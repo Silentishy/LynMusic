@@ -1,0 +1,158 @@
+name: Auto Sync Upstream & Release Standalone macOS
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Check every 6 hours
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: 'Force build a specific upstream tag (optional, e.g. v1.1.2)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_new_release: ${{ steps.check.outputs.has_new_release }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    steps:
+      - name: Check latest upstream release vs current fork releases
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FORCE_TAG="${{ github.event.inputs.force_tag }}"
+          if [ -n "$FORCE_TAG" ]; then
+            UPSTREAM_TAG="$FORCE_TAG"
+            echo "Forcing build for tag: $UPSTREAM_TAG"
+          else
+            UPSTREAM_TAG=$(gh api repos/wesley666/LynMusic/releases/latest --jq .tag_name)
+            echo "Latest upstream tag: $UPSTREAM_TAG"
+          fi
+
+          RELEASE_TAG="${UPSTREAM_TAG}-standalone-vlc"
+          echo "Target release tag: $RELEASE_TAG"
+
+          # Check if this release already exists on our fork
+          EXISTS=$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 && echo "yes" || echo "no")
+          echo "Release exists on fork: $EXISTS"
+
+          if [ "$EXISTS" = "no" ] || [ -n "$FORCE_TAG" ]; then
+            echo "has_new_release=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_new_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-macos:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_new_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git & Merge Upstream Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/wesley666/LynMusic.git
+          git fetch upstream tag ${{ needs.check-upstream.outputs.upstream_tag }} --no-tags
+          git merge --no-edit ${{ needs.check-upstream.outputs.upstream_tag }} || {
+            echo "Merge conflict detected with upstream ${{ needs.check-upstream.outputs.upstream_tag }}. Manual review required."
+            exit 1
+          }
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21.0.9'
+          distribution: 'oracle'
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Prepare Embedded LibVLC (macOS)
+        run: ./scripts/prepare_embedded_vlc_macos.sh
+
+      - name: Build macOS DMG
+        run: ./gradlew clean :composeApp:packageDmg
+
+      - name: Rename DMG artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          RAW_DMG=$(find composeApp/build/compose/binaries/main/dmg -name "*.dmg" | head -n 1)
+          TARGET_NAME="LynMusic-${{ needs.check-upstream.outputs.upstream_tag }}-standalone-${{ matrix.arch }}.dmg"
+          mv "$RAW_DMG" "artifacts/$TARGET_NAME"
+          echo "Prepared artifacts/$TARGET_NAME"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: LynMusic-${{ matrix.arch }}-dmg
+          path: artifacts/*.dmg
+          if-no-files-found: error
+
+  publish-release:
+    needs: [check-upstream, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git & Sync Main Branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/wesley666/LynMusic.git
+          git fetch upstream tag ${{ needs.check-upstream.outputs.upstream_tag }} --no-tags
+          git merge --no-edit ${{ needs.check-upstream.outputs.upstream_tag }} || exit 1
+          git push origin main || echo "Branch update pushed or already up-to-date"
+
+      - name: Download all DMG artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-dmgs
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ needs.check-upstream.outputs.release_tag }}"
+          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
+
+          echo "Files to upload:"
+          ls -lh release-dmgs/
+
+          gh release create "$RELEASE_TAG" release-dmgs/*.dmg \
+            --repo "${{ github.repository }}" \
+            --title "LynMusic ${UPSTREAM_TAG} (Standalone macOS with Embedded LibVLC)" \
+            --notes "### LynMusic ${UPSTREAM_TAG} for macOS (Standalone with Embedded LibVLC)
+
+本版本基于上游 [wesley666/LynMusic](https://github.com/wesley666/LynMusic) 的 ${UPSTREAM_TAG} 自动同步并构建，**免安装 VLC**。
+
+#### ✨ 特性
+- **内置 LibVLC 运行时与全套解码器/插件**：解压即用，无需在系统中单独安装 VLC.app。
+- **全格式支持**：支持 FLAC、AAC、MP3、OGG、OPUS、ALAC 等全部主流音频格式及网络流。
+- **双架构支持**：提供 Apple Silicon (\`arm64\`) 与 Intel (\`x64\`) 两种独立 DMG 安装包。
+
+#### 📥 下载安装
+- **Apple Silicon (M1/M2/M3/M4 系列芯片)**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-arm64.dmg\`
+- **Intel 芯片**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-x64.dmg\`"
