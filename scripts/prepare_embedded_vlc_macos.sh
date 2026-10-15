@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGET_DIR="$PROJECT_ROOT/composeApp/package-resources/vlc"
+TARGET_DIR="$PROJECT_ROOT/composeApp/package-resources/macos/vlc"
 
 echo "==> Preparing embedded LibVLC for macOS..."
 
@@ -34,12 +34,21 @@ if [ -z "$SOURCE_APP" ]; then
     ARCH="$(uname -m)"
     echo "No local VLC.app found. Target architecture: $ARCH"
 
-    # Try brew first if available
+    # Try brew cache first if available
     if command -v brew >/dev/null 2>&1; then
-        echo "Attempting to install VLC via Homebrew Cask..."
-        if brew install --cask vlc; then
-            if [ -d "/Applications/VLC.app" ]; then
-                SOURCE_APP="/Applications/VLC.app"
+        BREW_DMG="$(brew --cache --cask vlc 2>/dev/null || true)"
+        if [ -n "$BREW_DMG" ] && [ -f "$BREW_DMG" ]; then
+            echo "Found cached VLC DMG from Homebrew at $BREW_DMG"
+            MOUNT_DIR="$(mktemp -d /tmp/vlc_mount_XXXXXX)"
+            echo "Mounting DMG to $MOUNT_DIR..."
+            hdiutil attach "$BREW_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+            SOURCE_APP="$MOUNT_DIR/VLC.app"
+        else
+            echo "Attempting to install VLC via Homebrew Cask..."
+            if brew install --cask vlc; then
+                if [ -d "/Applications/VLC.app" ]; then
+                    SOURCE_APP="/Applications/VLC.app"
+                fi
             fi
         fi
     fi

@@ -27,3 +27,4 @@ design/
 /Caddyfile
 /*.perfetto-trace
 composeApp/package-resources/vlc/
+composeApp/package-resources/*/vlc/
