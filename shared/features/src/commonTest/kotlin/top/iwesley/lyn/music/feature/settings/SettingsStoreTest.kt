@@ -2016,7 +2016,7 @@ class SettingsStoreTest {
         ).toAppUpdateUiModel()
         assertLocalizedEquals(AppUpdateUiStatus.UpdateAvailable, update.status)
         assertLocalizedEquals("v1.0.8.1", update.latestVersion)
-        assertLocalizedEquals("发现可用更新，可以到公众号获取云盘链接或者 GitHub 下载。", update.message)
+        assertLocalizedEquals("发现可用更新，可以到 GitHub 下载。", update.message)
         assertLocalizedEquals("https://github.com/wesley666/LynMusic/releases/tag/v1.0.8.1", update.downloadUrl)
 
         val updateWithFallbackUrl = SettingsState(

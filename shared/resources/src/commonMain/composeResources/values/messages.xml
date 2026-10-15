@@ -4,7 +4,7 @@
     <string name="webdav_password_username_required">A username is required when using a WebDAV password.</string>
     <string name="common_about">About </string>
     <string name="favorites_track_added">Added to favorites.</string>
-    <string name="update_download_channels_hint">An update is available. Get a download link from the WeChat account or download from GitHub.</string>
+    <string name="update_download_channels_hint">An update is available. Download from GitHub.</string>
     <string name="tags_editor_applied_artwork_import_failed">Applied to the editor, but artwork import failed: %1$s</string>
     <string name="tags_editor_changes_applied">Applied to the editor. Save to write changes to the file.</string>
     <string name="tags_editor_artwork_applied">Artwork applied to the editor. Save to write changes to the file.</string>

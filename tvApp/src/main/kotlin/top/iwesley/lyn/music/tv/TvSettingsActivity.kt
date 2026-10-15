@@ -2448,37 +2448,11 @@ private fun TvAboutAppSettingsPane(
             TvDeviceInfoGroup(
                 title = uiString(Res.string.about_developer_label),
                 rows = listOf(
-                    uiString(Res.string.common_name) to "Wesley",
+                    uiString(Res.string.common_name) to "Wesley / Silentishy",
                     uiString(Res.string.about_project_website) to LynMusicUpdateLinks.PROJECT_URL,
+                    "原项目地址" to LynMusicUpdateLinks.ORIGINAL_PROJECT_URL,
                 ),
             )
-        }
-        item {
-            TvSettingsInfoCard(title = uiString(Res.string.about_wechat_account)) {
-                TvSettingsFieldRow(label = uiString(Res.string.common_account), value = uiString(Res.string.about_author_name))
-                Text(
-                    text = uiString(Res.string.about_wechat_qr_code),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    TvAboutAppQrImage(
-                        modifier = Modifier
-                            .widthIn(max = 260.dp)
-                            .fillMaxWidth(0.38f)
-                            .aspectRatio(1f),
-                    )
-                }
-                Text(
-                    text = uiString(Res.string.about_wechat_follow_hint),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
         }
     }
 }

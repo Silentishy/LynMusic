@@ -4,7 +4,7 @@
     <string name="webdav_password_username_required">WebDAV 使用密碼時必須填寫使用者名。</string>
     <string name="common_about">約 </string>
     <string name="favorites_track_added">已喜歡。</string>
-    <string name="update_download_channels_hint">發現可用更新，可以到公眾號獲取雲盤鏈接或者 GitHub 下載。</string>
+    <string name="update_download_channels_hint">發現可用更新，可以到 GitHub 下載。</string>
     <string name="tags_editor_applied_artwork_import_failed">已寫入編輯器，封面匯入失敗：%1$s</string>
     <string name="tags_editor_changes_applied">已寫入編輯器，點擊儲存可寫回檔案。</string>
     <string name="tags_editor_artwork_applied">封面已寫入編輯器，點擊儲存可寫回檔案。</string>

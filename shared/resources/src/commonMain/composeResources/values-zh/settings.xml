@@ -43,7 +43,7 @@
     <string name="font_deleting_progress">删除中...</string>
     <string name="desktop_lyrics_settings_title">桌面歌词</string>
     <string name="vlc_detected_path_label">自动识别路径</string>
-    <string name="about_app_information_summary">以下为开发者、项目地址和公众号信息。</string>
+    <string name="about_app_information_summary">以下为开发者与项目地址信息。</string>
     <string name="lyrics_source_kinds_description">Direct 源继续走声明式 extractor；Workflow 源通过 JSON 导入并参与同一优先级链路。</string>
     <string name="data_location_discard_old_data">丢弃旧数据</string>
     <string name="display_scale_title">显示大小</string>
@@ -141,7 +141,7 @@
     <string name="vlc_use_detected_path">恢复自动识别</string>
     <string name="about_version_unavailable">版本不可用</string>
     <string name="storage_cleanup_summary">查看并清理缓存占用。</string>
-    <string name="about_app_information_hint">查看开发者、项目地址和公众号信息。</string>
+    <string name="about_app_information_hint">查看开发者与项目地址信息。</string>
     <string name="storage_management_description">查看占用、清理缓存，并管理应用数据位置。</string>
     <string name="device_info_summary">查看系统、屏幕和硬件信息。</string>
     <string name="device_info_description">查看当前设备或主机的系统、屏幕和硬件信息。</string>

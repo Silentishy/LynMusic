@@ -38,5 +38,5 @@
     <string name="tv_about_app_version_description">版本和项目地址</string>
     <string name="tv_storage_management_hint">查看 TV 端可管理缓存，并按分类清理。</string>
     <string name="tv_device_information_hint">查看当前 TV 或车机的系统、屏幕和硬件信息。</string>
-    <string name="tv_about_app_information_hint">查看版本、开发者、项目地址和公众号信息。</string>
+    <string name="tv_about_app_information_hint">查看版本、开发者与项目地址信息。</string>
 </resources>

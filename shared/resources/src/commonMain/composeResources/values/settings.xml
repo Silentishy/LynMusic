@@ -43,7 +43,7 @@
     <string name="font_deleting_progress">Deleting...</string>
     <string name="desktop_lyrics_settings_title">Desktop lyrics</string>
     <string name="vlc_detected_path_label">Detected path</string>
-    <string name="about_app_information_summary">Developer, project, and WeChat information.</string>
+    <string name="about_app_information_summary">Developer and project information.</string>
     <string name="lyrics_source_kinds_description">Direct sources use a declarative extractor. Workflow sources are imported as JSON and use the same priority chain.</string>
     <string name="data_location_discard_old_data">Discard old data</string>
     <string name="display_scale_title">Display size</string>
@@ -141,7 +141,7 @@
     <string name="vlc_use_detected_path">Use detected path</string>
     <string name="about_version_unavailable">Version unavailable</string>
     <string name="storage_cleanup_summary">View and clear cached data.</string>
-    <string name="about_app_information_hint">View developer, project, and WeChat information.</string>
+    <string name="about_app_information_hint">View developer and project information.</string>
     <string name="storage_management_description">View storage usage, clear caches, and manage the app data location.</string>
     <string name="device_info_summary">View system, display, and hardware information.</string>
     <string name="device_info_description">View system, display, and hardware information for this device or computer.</string>

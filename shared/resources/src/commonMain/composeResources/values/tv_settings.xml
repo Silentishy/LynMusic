@@ -38,5 +38,5 @@
     <string name="tv_about_app_version_description">Version and project website</string>
     <string name="tv_storage_management_hint">View and clear manageable caches on this TV by category.</string>
     <string name="tv_device_information_hint">View system, display, and hardware information for this TV or car device.</string>
-    <string name="tv_about_app_information_hint">View version, developer, project, and WeChat information.</string>
+    <string name="tv_about_app_information_hint">View version, developer, and project information.</string>
 </resources>

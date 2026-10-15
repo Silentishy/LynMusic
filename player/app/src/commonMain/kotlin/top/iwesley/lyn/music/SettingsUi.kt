@@ -2163,7 +2163,7 @@ private fun AboutAppSettingsPane(
         AboutDeviceInfoCard(title = uiString(Res.string.about_developer_label)) {
             AboutAppFieldRow(
                 label = uiString(Res.string.common_name),
-                value = ABOUT_APP_DEVELOPER,
+                value = "$ABOUT_APP_DEVELOPER / Silentishy",
             )
         }
         AboutDeviceInfoCard(title = uiString(Res.string.about_project_website)) {
@@ -2172,28 +2172,10 @@ private fun AboutAppSettingsPane(
                 value = LynMusicUpdateLinks.PROJECT_URL,
                 url = LynMusicUpdateLinks.PROJECT_URL,
             )
-        }
-        AboutDeviceInfoCard(title = uiString(Res.string.about_wechat_account)) {
-            AboutAppFieldRow(
-                label = uiString(Res.string.common_account),
-                value = ABOUT_APP_WECHAT_ACCOUNT,
-            )
-            Text(
-                text = uiString(Res.string.about_wechat_qr_code),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            AboutAppQrImage(
-                modifier = Modifier
-                    .fillMaxWidth(0.58f)
-                    .widthIn(max = 220.dp)
-                    .aspectRatio(1f)
-                    .align(Alignment.CenterHorizontally),
-            )
-            Text(
-                text = uiString(Res.string.about_wechat_follow_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = shellColors.secondaryText,
+            AboutAppLinkFieldRow(
+                label = "原项目地址",
+                value = LynMusicUpdateLinks.ORIGINAL_PROJECT_URL,
+                url = LynMusicUpdateLinks.ORIGINAL_PROJECT_URL,
             )
         }
     }
@@ -2818,7 +2800,6 @@ private fun deviceInfoMemoryValue(totalMemoryBytes: Long?, loading: Boolean): St
 private const val ABOUT_APP_NAME = "LynMusic"
 private val ABOUT_APP_SUMMARY: String @Composable get() = uiString(Res.string.about_app_information_summary)
 private val ABOUT_APP_DEVELOPER: String @Composable get() = uiString(Res.string.about_author_name)
-private val ABOUT_APP_WECHAT_ACCOUNT: String @Composable get() = uiString(Res.string.about_author_name)
 
 @Composable
 private fun ThemePresetCard(

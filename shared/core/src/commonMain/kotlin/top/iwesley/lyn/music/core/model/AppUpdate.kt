@@ -1,9 +1,10 @@
 package top.iwesley.lyn.music.core.model
 
 object LynMusicUpdateLinks {
-    const val PROJECT_URL = "https://github.com/wesley666/LynMusic"
+    const val ORIGINAL_PROJECT_URL = "https://github.com/wesley666/LynMusic"
+    const val PROJECT_URL = "https://github.com/Silentishy/LynMusic"
     const val RELEASES_URL = "$PROJECT_URL/releases"
-    const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/wesley666/LynMusic/releases/latest"
+    const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/Silentishy/LynMusic/releases/latest"
 }
 
 fun isAppReleaseNewer(

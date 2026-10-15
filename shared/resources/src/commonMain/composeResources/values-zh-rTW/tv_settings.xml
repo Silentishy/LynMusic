@@ -38,5 +38,5 @@
     <string name="tv_about_app_version_description">版本和項目地址</string>
     <string name="tv_storage_management_hint">查看 TV 端可管理快取，並按分類清理。</string>
     <string name="tv_device_information_hint">查看當前 TV 或車機的系統、屏幕和硬件信息。</string>
-    <string name="tv_about_app_information_hint">查看版本、開發者、項目地址和公眾號信息。</string>
+    <string name="tv_about_app_information_hint">查看版本、開發者與項目地址信息。</string>
 </resources>
