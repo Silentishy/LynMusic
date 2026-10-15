@@ -259,6 +259,7 @@ compose.desktop {
             packageVersion = desktopPackageVersion
             //includeAllModules = true
             modules("java.management", "java.security.jgss", "jdk.management")
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("package-resources"))
             macOS {
                 bundleID = "top.iwesley.lyn.music"
                 iconFile.set(project.file("src/jvmMain/resources/desktop-icon.icns"))

@@ -62,6 +62,26 @@ class VlcSupportTest {
     }
 
     @Test
+    fun `macos vlc directory with lib subfolder normalizes to lib directory`() {
+        val vlcDir = Path.of("/app/vlc")
+        val expected = vlcDir.toAbsolutePath().normalize().resolve("lib")
+
+        val normalized = normalizeDesktopVlcSelection(
+            selection = vlcDir,
+            osName = "Mac OS X",
+            listEntries = { path ->
+                if (path == expected) {
+                    listOf("libvlc.dylib", "libvlccore.dylib", "plugins")
+                } else {
+                    listOf("lib", "plugins")
+                }
+            },
+        )
+
+        assertEquals(expected, normalized)
+    }
+
+    @Test
     fun `manual vlc path takes precedence over auto detected path`() {
         assertEquals(
             "/manual/vlc/lib",

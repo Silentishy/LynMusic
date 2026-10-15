@@ -3193,14 +3193,16 @@ private fun createJvmVlcRuntimeInitializationResult(
     val manualPath = desktopVlcPreferencesStore.desktopVlcManualPath.value
         ?.trim()
         ?.takeIf { it.isNotBlank() }
-    val discovery = if (manualPath == null) {
-        NativeDiscovery()
-    } else {
-        createDesktopVlcDiscovery(manualPath)
+    val bundledPath = findBundledDesktopVlcDirectory()
+    val discovery = when {
+        manualPath != null -> createDesktopVlcDiscovery(manualPath)
+        bundledPath != null -> createDesktopVlcDiscovery(bundledPath.toString())
+        else -> NativeDiscovery()
     }
-    val runtime = createJvmVlcRuntime(discovery, logger)
+    val runtime = createJvmVlcRuntime(discovery, bundledPath, logger)
     val autoDetectedPath = if (manualPath == null) {
         runtime?.nativeLibraryPath?.trim()?.takeIf { it.isNotBlank() }
+            ?: bundledPath?.toString()
     } else {
         null
     }
@@ -3217,12 +3219,18 @@ private fun createJvmVlcRuntimeInitializationResult(
 
 private fun createJvmVlcRuntime(
     discovery: NativeDiscovery,
+    bundledPath: Path? = null,
     logger: DiagnosticLogger,
 ): JvmVlcPlaybackRuntime? {
     var createdFactory: MediaPlayerFactory? = null
     var createdNativeLog: NativeLog? = null
     return runCatching {
-        val factory = MediaPlayerFactory(discovery)
+        val pluginsDir = bundledPath?.let(::resolveDesktopVlcPluginsDirectory)
+        val factory = if (pluginsDir != null) {
+            MediaPlayerFactory(discovery, "--plugin-path=${pluginsDir.toAbsolutePath()}")
+        } else {
+            MediaPlayerFactory(discovery)
+        }
         createdFactory = factory
         val nativeLog = runCatching { factory.application().newLog() }
             .onFailure { throwable ->

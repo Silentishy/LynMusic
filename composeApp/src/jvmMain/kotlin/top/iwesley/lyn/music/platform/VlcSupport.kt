@@ -21,6 +21,58 @@ internal fun resolveDesktopVlcEffectivePath(
         ?: autoDetectedPath?.trim()?.takeIf { it.isNotBlank() }
 }
 
+internal fun findBundledDesktopVlcDirectory(
+    osName: String = System.getProperty("os.name"),
+    listEntries: (Path) -> List<String> = ::listDesktopVlcDirectoryEntries,
+): Path? {
+    val searchRoots = mutableListOf<Path>()
+
+    // 1. Compose Desktop app resources dir (System property set by Compose launcher)
+    val composeResourcesDir = System.getProperty("compose.application.resources.dir")
+    if (!composeResourcesDir.isNullOrBlank()) {
+        searchRoots.add(Path.of(composeResourcesDir).resolve("vlc"))
+    }
+
+    // 2. Packaged macOS app bundle: java.home is typically Contents/runtime/Contents/Home
+    val javaHome = System.getProperty("java.home")
+    if (!javaHome.isNullOrBlank()) {
+        val javaHomePath = Path.of(javaHome)
+        // LynMusic.app/Contents/runtime/Contents/Home -> LynMusic.app/Contents/Resources/vlc
+        searchRoots.add(javaHomePath.resolve("../../../Resources/vlc").normalize())
+        searchRoots.add(javaHomePath.resolve("../../Resources/vlc").normalize())
+        // Windows/Linux runtime fallback: LynMusic/runtime -> LynMusic/vlc
+        searchRoots.add(javaHomePath.resolve("../../vlc").normalize())
+    }
+
+    // 3. Current working directory / dev environment
+    val userDir = Path.of(System.getProperty("user.dir"))
+    searchRoots.add(userDir.resolve("package-resources").resolve("vlc"))
+    searchRoots.add(userDir.resolve("composeApp").resolve("package-resources").resolve("vlc"))
+
+    for (root in searchRoots) {
+        if (!Files.isDirectory(root)) continue
+        // Check root directly (e.g. if root contains libvlc.dylib)
+        if (containsDesktopVlcLibraries(root, osName, listEntries)) {
+            return root.toAbsolutePath().normalize()
+        }
+        // Check root/lib (e.g. if root/lib contains libvlc.dylib)
+        val libSubdir = root.resolve("lib")
+        if (Files.isDirectory(libSubdir) && containsDesktopVlcLibraries(libSubdir, osName, listEntries)) {
+            return libSubdir.toAbsolutePath().normalize()
+        }
+    }
+    return null
+}
+
+internal fun resolveDesktopVlcPluginsDirectory(libraryDirectory: Path): Path? {
+    val candidatePlugins = listOf(
+        libraryDirectory.resolve("plugins"),
+        libraryDirectory.resolve("../plugins").normalize(),
+        libraryDirectory.parent?.resolve("plugins"),
+    )
+    return candidatePlugins.firstOrNull { it != null && Files.isDirectory(it) }?.toAbsolutePath()?.normalize()
+}
+
 internal fun normalizeDesktopVlcSelection(
     selection: Path,
     osName: String = System.getProperty("os.name"),
@@ -30,6 +82,12 @@ internal fun normalizeDesktopVlcSelection(
     val candidate = when {
         isDesktopMacOs(osName) && normalizedSelection.fileName?.toString()?.endsWith(".app", ignoreCase = true) == true ->
             normalizedSelection.resolve("Contents").resolve("MacOS").resolve("lib")
+
+        containsDesktopVlcLibraries(normalizedSelection, osName, listEntries) ->
+            normalizedSelection
+
+        containsDesktopVlcLibraries(normalizedSelection.resolve("lib"), osName, listEntries) ->
+            normalizedSelection.resolve("lib")
 
         else -> normalizedSelection
     }
@@ -112,5 +170,17 @@ private class FixedPathNativeDiscoveryStrategy(
 
     override fun onFound(path: String): Boolean = delegate.onFound(path)
 
-    override fun onSetPluginPath(path: String): Boolean = delegate.onSetPluginPath(path)
+    override fun onSetPluginPath(path: String): Boolean {
+        val pluginsDir = resolveDesktopVlcPluginsDirectory(Path.of(path))
+        if (pluginsDir != null) {
+            runCatching {
+                uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv(
+                    "VLC_PLUGIN_PATH",
+                    pluginsDir.toString(),
+                    1,
+                )
+            }
+        }
+        return delegate.onSetPluginPath(path)
+    }
 }
