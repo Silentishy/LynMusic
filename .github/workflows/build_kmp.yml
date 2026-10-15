@@ -133,6 +133,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v3
 
+      - name: Prepare Embedded LibVLC (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/prepare_embedded_vlc_macos.sh
+
       - name: Clean & Build Desktop App (Windows)
         if: runner.os == 'Windows'
         run: .\gradlew.bat clean :composeApp:packageDistributionForCurrentOS

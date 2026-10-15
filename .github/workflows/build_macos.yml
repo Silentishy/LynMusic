@@ -8,7 +8,15 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -20,19 +28,33 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v3
 
+      - name: Prepare Embedded LibVLC (macOS)
+        run: ./scripts/prepare_embedded_vlc_macos.sh
+
       - name: Clean & Build Desktop App (macOS)
         run: ./gradlew clean :composeApp:packageDistributionForCurrentOS
+
+      - name: Rename macOS artifacts with architecture
+        shell: bash
+        run: |
+          find composeApp/build/compose/binaries -type f \( -name "*.dmg" -o -name "*.pkg" \) | while read -r file; do
+            dir="$(dirname "$file")"
+            base="$(basename "$file")"
+            ext="${base##*.}"
+            name="${base%.*}"
+            mv "$file" "$dir/${name}-${{ matrix.arch }}.${ext}"
+          done
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: Desktop-App-macOS-dmg
+          name: Desktop-App-macOS-${{ matrix.arch }}-dmg
           path: composeApp/build/compose/binaries/main/dmg/*.dmg
           if-no-files-found: error
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: Desktop-App-macOS-pkg
+          name: Desktop-App-macOS-${{ matrix.arch }}-pkg
           path: composeApp/build/compose/binaries/main/pkg/*.pkg
           if-no-files-found: error
