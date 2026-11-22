@@ -193,7 +193,9 @@ fun buildNavidromeStreamUrl(
     password: String,
     songId: String,
     audioQuality: NavidromeAudioQuality = NavidromeAudioQuality.Original,
+    timeOffsetSeconds: Long? = null,
 ): String {
+    require(timeOffsetSeconds == null || timeOffsetSeconds >= 0L)
     return buildSubsonicRestUrl(
         baseUrl = baseUrl,
         username = username,
@@ -205,6 +207,7 @@ fun buildNavidromeStreamUrl(
             audioQuality.maxBitRateKbps?.let { maxBitRate ->
                 put("maxBitRate", maxBitRate.toString())
                 put("format", "mp3")
+                timeOffsetSeconds?.takeIf { it > 0L }?.let { put("timeOffset", it.toString()) }
             }
         },
         includeJsonFormat = false,
@@ -218,7 +221,9 @@ fun buildSubsonicStreamUrl(
     authMode: SubsonicAuthMode,
     songId: String,
     audioQuality: NavidromeAudioQuality = NavidromeAudioQuality.Original,
+    timeOffsetSeconds: Long? = null,
 ): String {
+    require(timeOffsetSeconds == null || timeOffsetSeconds >= 0L)
     return buildSubsonicRestUrl(
         baseUrl = baseUrl,
         username = username,
@@ -230,6 +235,7 @@ fun buildSubsonicStreamUrl(
             audioQuality.maxBitRateKbps?.let { maxBitRate ->
                 put("maxBitRate", maxBitRate.toString())
                 put("format", "mp3")
+                timeOffsetSeconds?.takeIf { it > 0L }?.let { put("timeOffset", it.toString()) }
             }
         },
         includeJsonFormat = false,
@@ -468,6 +474,37 @@ suspend fun requestNavidromeSongPage(
     pageSize: Int,
     logger: DiagnosticLogger = NoopDiagnosticLogger,
     timeoutMillis: Long? = null,
+): NavidromeSongPage {
+    val selector = source.addressSelector
+    val sourceId = source.sourceId
+    if (selector != null && sourceId != null) {
+        return selector.withAddressFallback(
+            sourceId = sourceId,
+            sourceType = source.sourceType,
+            lanBaseUrl = source.baseUrl,
+            wanBaseUrl = source.wanBaseUrl,
+            normalizeBaseUrl = ::normalizeNavidromeBaseUrl,
+        ) { candidate ->
+            requestNavidromeSongPageWithoutAddressFallback(
+                httpClient = httpClient,
+                source = source.copy(baseUrl = candidate.value, wanBaseUrl = null, addressSelector = null),
+                start = start,
+                pageSize = pageSize,
+                logger = logger,
+                timeoutMillis = timeoutMillis,
+            )
+        }
+    }
+    return requestNavidromeSongPageWithoutAddressFallback(httpClient, source, start, pageSize, logger, timeoutMillis)
+}
+
+private suspend fun requestNavidromeSongPageWithoutAddressFallback(
+    httpClient: LyricsHttpClient,
+    source: NavidromeResolvedSource,
+    start: Int,
+    pageSize: Int,
+    logger: DiagnosticLogger,
+    timeoutMillis: Long?,
 ): NavidromeSongPage {
     val token = requestNavidromeNativeToken(
         httpClient = httpClient,
@@ -791,6 +828,7 @@ private suspend fun requestNavidromeNativeToken(
             timeoutMillis = timeoutMillis,
         ),
     ).getOrElse { throwable ->
+        if (throwable is CancellationException) throw throwable
         throw RemoteSourceRequestException(uiText(Res.string.server_request_failed, "Navidrome", "/auth/login", throwable.uiErrorDetail()), throwable)
     }
     if (loginResponse.statusCode.isNavidromeNativeIncompatibleStatus()) {
@@ -826,50 +864,115 @@ private suspend fun requestNavidromeNativeSongPage(
     pageSize: Int,
     timeoutMillis: Long? = null,
 ): NavidromeNativeSongPage {
-    val end = start + pageSize
+    val page = requestNavidromeNativePage(httpClient, source, token, "song", start, pageSize,
+        mapOf("_sort" to "path"), timeoutMillis)
+    return NavidromeNativeSongPage(page.items.map { it.toNavidromeNativeSongCandidate() }, page.totalCount)
+}
+
+internal suspend fun requestNavidromeArtistSongs(
+    httpClient: LyricsHttpClient,
+    source: NavidromeResolvedSource,
+    artistId: String,
+    logger: DiagnosticLogger = NoopDiagnosticLogger,
+    timeoutMillis: Long? = null,
+): List<NavidromeSongCandidate> = requestNavidromeArtistItems(
+    httpClient, source, artistId, "song", "artists_id", logger, timeoutMillis,
+).filter { song ->
+    // artists_id also matches album artists; retain direct track artists and participating artists.
+    song.string("artistId") == artistId ||
+        (song["participants"] as? JsonObject)?.get("artist").asObjectList().any { it.string("id") == artistId }
+}.filter { !it.string("id").isNullOrBlank() }.map { song ->
+    song.toNavidromeNativeSongCandidate().let { it.copy(remoteFavoriteHint = it.remoteFavoriteHint ?: false) }
+}.distinctBy { it.songId }
+
+internal suspend fun requestNavidromeArtistAlbums(
+    httpClient: LyricsHttpClient,
+    source: NavidromeResolvedSource,
+    artistId: String,
+    logger: DiagnosticLogger = NoopDiagnosticLogger,
+    timeoutMillis: Long? = null,
+): List<JsonObject> = requestNavidromeArtistItems(
+    httpClient, source, artistId, "album", "artist_id", logger, timeoutMillis,
+).distinctBy { it.string("id") }
+
+private suspend fun requestNavidromeArtistItems(
+    httpClient: LyricsHttpClient,
+    source: NavidromeResolvedSource,
+    artistId: String,
+    resource: String,
+    artistFilter: String,
+    logger: DiagnosticLogger,
+    timeoutMillis: Long?,
+): List<JsonObject> {
+    suspend fun load(resolved: NavidromeResolvedSource): List<JsonObject> {
+        val token = requestNavidromeNativeToken(httpClient, resolved, logger, timeoutMillis)
+        val items = mutableListOf<JsonObject>()
+        val pageSize = 200
+        var offset = 0
+        do {
+            val page = requestNavidromeNativePage(httpClient, resolved, token, resource, offset, pageSize,
+                mapOf(artistFilter to artistId, "_sort" to "id"), timeoutMillis)
+            items += page.items
+            // Advance by the raw page, before artist-role filtering or de-duplication.
+            offset += page.items.size
+            if (page.items.isEmpty() || (page.totalCount?.let { offset >= it } ?: (page.items.size < pageSize))) break
+        } while (true)
+        return items
+    }
+    val selector = source.addressSelector
+    val sourceId = source.sourceId
+    return if (selector != null && sourceId != null) {
+        selector.withAddressFallback(sourceId, source.sourceType, source.baseUrl, source.wanBaseUrl,
+            normalizeBaseUrl = ::normalizeNavidromeBaseUrl) { candidate ->
+            load(source.copy(baseUrl = candidate.value, wanBaseUrl = null, addressSelector = null))
+        }
+    } else load(source)
+}
+
+private data class NavidromeNativePage(val items: List<JsonObject>, val totalCount: Int?)
+
+private suspend fun requestNavidromeNativePage(
+    httpClient: LyricsHttpClient,
+    source: NavidromeResolvedSource,
+    token: String,
+    resource: String,
+    start: Int,
+    pageSize: Int,
+    filters: Map<String, String>,
+    timeoutMillis: Long?,
+): NavidromeNativePage {
+    val endpoint = "/api/$resource"
     val response = httpClient.request(
         LyricsRequest(
             method = RequestMethod.GET,
-            url = buildNavidromeNativeUrl(
-                source.baseUrl,
-                "api",
-                "song",
-                queryParameters = mapOf(
-                    "_start" to start.toString(),
-                    "_end" to end.toString(),
-                    "_sort" to "path",
-                    "_order" to "ASC",
-                ),
-            ),
+            url = buildNavidromeNativeUrl(source.baseUrl, "api", resource,
+                queryParameters = mapOf("_start" to start.toString(), "_end" to (start + pageSize).toString(),
+                    "_order" to "ASC") + filters),
             headers = mapOf("X-ND-Authorization" to "Bearer $token"),
             timeoutMillis = timeoutMillis,
         ),
     ).getOrElse { throwable ->
-        throw RemoteSourceRequestException(uiText(Res.string.server_request_failed, "Navidrome", "/api/song", throwable.uiErrorDetail()), throwable)
+        if (throwable is CancellationException) throw throwable
+        throw RemoteSourceRequestException(uiText(Res.string.server_request_failed, "Navidrome", endpoint, throwable.uiErrorDetail()), throwable)
     }
     if (response.statusCode.isNavidromeNativeIncompatibleStatus()) {
-        throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_http_failed, "Navidrome", "/api/song", response.statusCode), httpStatusCode = response.statusCode)
+        throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_http_failed, "Navidrome", endpoint, response.statusCode), httpStatusCode = response.statusCode)
     }
     if (response.statusCode !in 200..299) {
-        throw RemoteSourceHttpException(response.statusCode, uiText(Res.string.server_http_failed, "Navidrome", "/api/song", response.statusCode))
+        throw RemoteSourceHttpException(response.statusCode, uiText(Res.string.server_http_failed, "Navidrome", endpoint, response.statusCode))
     }
     val root = try {
         subsonicJson.parseToJsonElement(response.body)
     } catch (exception: Exception) {
-        throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_not_array, "Navidrome", "/api/song"), exception)
+        throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_not_array, "Navidrome", endpoint), exception)
     }
-    val songArray = root as? JsonArray
-        ?: throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_not_array, "Navidrome", "/api/song"))
-    val songs = songArray
-        .mapIndexed { index, element ->
-            val song = element as? JsonObject
-                ?: throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_item_invalid, "Navidrome", "/api/song", start + index))
-            song.toNavidromeNativeSongCandidate()
-        }
-    return NavidromeNativeSongPage(
-        songs = songs,
-        totalTrackCount = response.headers.headerIgnoreCase("X-Total-Count")?.toIntOrNull(),
-    )
+    val array = root as? JsonArray
+        ?: throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_not_array, "Navidrome", endpoint))
+    val items = array.mapIndexed { index, element ->
+        element as? JsonObject
+            ?: throw NavidromeNativeApiIncompatibleException(uiText(Res.string.server_response_item_invalid, "Navidrome", endpoint, start + index))
+    }
+    return NavidromeNativePage(items, response.headers.headerIgnoreCase("X-Total-Count")?.toIntOrNull())
 }
 
 private fun buildNavidromeNativeUrl(
@@ -954,14 +1057,10 @@ suspend fun requestNavidromeLyrics(
         artistName = track.artistName,
         logger = logger,
     ) ?: return null
-    val lines = parseLrc(payload).ifEmpty { parsePlainText(payload) }
-    if (lines.isEmpty()) return null
-    val document = LyricsDocument(
-        lines = lines,
-        offsetMs = 0L,
+    val document = parseCachedLyrics(
         sourceId = lyricsSourceIdFor(source.sourceType),
         rawPayload = payload,
-    )
+    ) ?: return null
     logger.log(
         level = DiagnosticLogLevel.INFO,
         tag = source.logTag,
@@ -1247,7 +1346,7 @@ suspend fun resolveSubsonicCompatibleCoverArtUrlCandidates(
     }
 }
 
-private suspend fun resolveNavidromeSource(
+suspend fun resolveNavidromeSource(
     database: LynMusicDatabase,
     secureCredentialStore: SecureCredentialStore,
     locator: String,

@@ -1,5 +1,7 @@
 package top.iwesley.lyn.music.feature.tags
 
+import top.iwesley.lyn.music.testing.UiResourceTest
+
 import top.iwesley.lyn.music.resources.*
 
 import kotlinx.coroutines.CoroutineScope
@@ -42,7 +44,7 @@ import top.iwesley.lyn.music.data.repository.ResolvedLyricsResult
 import top.iwesley.lyn.music.domain.serializeLyricsDocument
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class MusicTagsStoreTest {
+class MusicTagsStoreTest : UiResourceTest() {
     @Test
     fun describedTagFormatFollowsLanguageWithoutResettingDraft() = runTest {
         val originalLanguage = AppLanguageRuntime.appLanguage.value
@@ -509,6 +511,33 @@ class MusicTagsStoreTest {
         assertLocalizedEquals(enhancedRawPayload, state.draft.embeddedLyrics)
         assertLocalizedEquals("已写入编辑器，点击保存可写回文件。", state.message)
         assertTrue(state.isDirty)
+    }
+
+    @Test
+    fun `applying TTML imports line LRC into draft without writing the file`() = runTest {
+        val track = sampleTrack()
+        val repository = FakeMusicTagsRepository(listOf(track), mapOf(track.id to sampleSnapshot()))
+        val ttml = """<tt xmlns:m="urn:metadata"><body><p begin="1s" end="2s"><span begin="1s" end="2s">Hello</span><span m:role="x-translation">你好</span></p></body></tt>"""
+        val candidate = LyricsSearchCandidate(
+            sourceId = "managed-lrcapi",
+            sourceName = "LrcAPI",
+            document = LyricsDocument(
+                lines = listOf(LyricsLine(1_000L, "Hello")),
+                sourceId = "managed-lrcapi",
+                rawPayload = ttml,
+            ),
+        )
+        val store = createStore(repository, testScheduler)
+        advanceUntilIdle()
+        store.dispatch(MusicTagsIntent.OpenOnlineLyricsSearch)
+        advanceUntilIdle()
+        store.dispatch(MusicTagsIntent.ApplyOnlineLyricsCandidate(candidate, LyricsSearchApplyMode.LYRICS_ONLY))
+        advanceUntilIdle()
+
+        assertEquals("[00:01.00]Hello", store.state.value.draft.embeddedLyrics)
+        assertEquals(ttml, candidate.document.rawPayload)
+        assertEquals(0, repository.saveCalls)
+        assertTrue(store.state.value.isDirty)
     }
 
     @Test

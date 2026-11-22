@@ -29,6 +29,9 @@
     <string name="window_close_minimize_hint">开启后，关闭窗口会最小化到程序坞（Dock）；关闭此选项后会退出应用。仍可使用 ⌘Q 退出。</string>
     <string name="settings_help_description">查看投屏和后台运行常见问题。</string>
     <string name="display_scale_compact">紧凑</string>
+    <string name="display_scale_extra_compact">更紧凑</string>
+    <string name="display_scale_extra_large">特大号</string>
+    <string name="display_scale_value">%1$s · %2$s</string>
     <string name="lyrics_sources_settings_summary">配置歌词 API 和搜索源。</string>
     <string name="lyrics_sources_settings_description">配置歌词 API、搜索源和播放缓存。</string>
     <string name="workflow_editor_description">用于新建或编辑多阶段歌词源，支持搜歌 -&gt; 选歌 -&gt; 拉歌词。当前仍直接编辑原始 JSON。</string>
@@ -64,7 +67,7 @@
     <string name="cast_background_troubleshooting_title">后台投屏失败，怎么解决</string>
     <string name="cast_background_suspension_hint">投屏时如果应用退到后台后无法自动投下一首，通常是系统冻结了后台运行。</string>
     <string name="font_import_action">导入字体</string>
-    <string name="font_import_description">导入 .ttf / .otf 字体后，可在歌词分享页里直接选择并参与最终出图。</string>
+    <string name="font_import_description">导入 .ttf / .otf 字体后，可在播放歌词和歌词分享中选择使用。</string>
     <string name="font_importing_progress">导入中...</string>
     <string name="playback_ffmpeg_decoder_hint">用于提升部分 Android 设备的音频格式兼容性，切换后下一首歌生效。</string>
     <string name="display_scale_large">大号</string>

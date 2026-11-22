@@ -45,12 +45,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.room.Room
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -78,6 +79,8 @@ import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -143,6 +146,10 @@ import top.iwesley.lyn.music.core.model.PlaybackLoadToken
 import top.iwesley.lyn.music.core.model.PlaybackPreferencesStore
 import top.iwesley.lyn.music.core.model.PlayerArtworkStyle
 import top.iwesley.lyn.music.core.model.PlayerArtworkStylePreferencesStore
+import top.iwesley.lyn.music.core.model.PlayerLyricsStyle
+import top.iwesley.lyn.music.core.model.PlayerLyricsStylePreferencesStore
+import top.iwesley.lyn.music.core.model.encodePlayerLyricsStyle
+import top.iwesley.lyn.music.core.model.decodePlayerLyricsStyle
 import top.iwesley.lyn.music.core.model.LyricsShareFontPreferencesStore
 import top.iwesley.lyn.music.core.model.RequestMethod
 import top.iwesley.lyn.music.core.model.DEFAULT_PLAYBACK_VOLUME
@@ -190,12 +197,13 @@ import top.iwesley.lyn.music.core.model.unsupportedAudioImportFailure
 import top.iwesley.lyn.music.core.model.warn
 import top.iwesley.lyn.music.core.model.withSecureInMemoryCache
 import top.iwesley.lyn.music.data.db.LynMusicDatabase
-import top.iwesley.lyn.music.data.db.openLynMusicDatabase
 import top.iwesley.lyn.music.data.repository.DailyRecommendationDateChangeNotifier
 import top.iwesley.lyn.music.data.repository.DailyRecommendationDateKeyProvider
 import top.iwesley.lyn.music.data.repository.PlayerRuntimeServices
 import top.iwesley.lyn.music.domain.RemoteSourceResolvedUrl
 import top.iwesley.lyn.music.domain.resolveNavidromeStreamUrl
+import top.iwesley.lyn.music.domain.resolveNavidromeSource
+import top.iwesley.lyn.music.domain.NavidromeTranscodeCapabilities
 import top.iwesley.lyn.music.domain.resolveEmbyStreamUrl
 import top.iwesley.lyn.music.domain.RemoteSourceAddressSelector
 import top.iwesley.lyn.music.domain.isRemoteSourceAddressFallbackAllowed
@@ -214,6 +222,8 @@ import top.iwesley.lyn.music.domain.testEmbyConnection
 import top.iwesley.lyn.music.domain.testNavidromeConnection
 import top.iwesley.lyn.music.domain.testSubsonicConnection
 import top.iwesley.lyn.music.feature.library.LibrarySourceFilter
+import top.iwesley.lyn.music.feature.library.encodeLibrarySourceFilter
+import top.iwesley.lyn.music.feature.library.decodeLibrarySourceFilter
 import top.iwesley.lyn.music.feature.library.LibrarySourceFilterPreferencesStore
 import top.iwesley.lyn.music.feature.library.TrackSortMode
 import com.hierynomus.msdtyp.AccessMask
@@ -239,7 +249,6 @@ import kotlin.coroutines.resumeWithException
 data class AndroidRuntimeGraph(
     val sharedGraph: SharedGraph,
     val playerRuntimeServices: PlayerRuntimeServices,
-    private val ownsDatabase: Boolean = false,
 ) {
     private val failureCleanupStarted = AtomicBoolean(false)
 
@@ -265,9 +274,6 @@ data class AndroidRuntimeGraph(
                 closeResource { playerRuntimeServices.menuBarLyricsControlsPlatformService.close() }
                 closeResource { playerRuntimeServices.playbackRepository?.close() }
                 closeResource { playerRuntimeServices.closeDesktopResources() }
-                if (ownsDatabase) {
-                    closeResource { sharedGraph.database.close() }
-                }
 
                 failures.firstOrNull()?.let { primary ->
                     failures.drop(1).forEach { failure ->
@@ -280,14 +286,11 @@ data class AndroidRuntimeGraph(
     }
 }
 
-fun openAndroidRuntimeDatabase(context: Context): LynMusicDatabase {
-    return openLynMusicDatabase(
-        Room.databaseBuilder<LynMusicDatabase>(
-            context = context.applicationContext,
-            name = context.applicationContext.getDatabasePath("lynmusic.db").absolutePath,
-        ),
-    ).getOrThrow()
-}
+private val processDatabaseProvider = AndroidRuntimeDatabaseProvider()
+
+/** The database belongs to the app process; individual components must not close it. */
+fun openAndroidRuntimeDatabase(context: Context): LynMusicDatabase =
+    processDatabaseProvider.getOrCreate(context)
 
 fun createAndroidRuntimeGraph(
     activity: ComponentActivity,
@@ -295,16 +298,13 @@ fun createAndroidRuntimeGraph(
 ): AndroidRuntimeGraph {
     val logger = AndroidDiagnosticLogger(enabled = true, label = platformName)
     val database = openAndroidRuntimeDatabase(activity.applicationContext)
-    return createAndroidRuntimeGraphWithOwnedDatabase(database) {
-        createAndroidRuntimeGraph(
-            context = activity.applicationContext,
-            database = database,
-            activityActions = FixedAndroidActivityActions(activity, logger),
-            platformName = platformName,
-            logger = logger,
-            ownsDatabase = true,
-        )
-    }
+    return createAndroidRuntimeGraph(
+        context = activity.applicationContext,
+        database = database,
+        activityActions = FixedAndroidActivityActions(activity, logger),
+        platformName = platformName,
+        logger = logger,
+    )
 }
 
 fun createAndroidRuntimeGraph(
@@ -319,7 +319,6 @@ fun createAndroidRuntimeGraph(
         activityActions = FixedAndroidActivityActions(activity, logger),
         platformName = platformName,
         logger = logger,
-        ownsDatabase = false,
     )
 }
 
@@ -330,29 +329,13 @@ fun createAndroidRuntimeGraph(
 ): AndroidRuntimeGraph {
     val logger = AndroidDiagnosticLogger(enabled = true, label = platformName)
     val database = openAndroidRuntimeDatabase(context)
-    return createAndroidRuntimeGraphWithOwnedDatabase(database) {
-        createAndroidRuntimeGraph(
-            context = context.applicationContext,
-            database = database,
-            activityActions = activityActions,
-            platformName = platformName,
-            logger = logger,
-            ownsDatabase = true,
-        )
-    }
-}
-
-private fun createAndroidRuntimeGraphWithOwnedDatabase(
-    database: LynMusicDatabase,
-    factory: () -> AndroidRuntimeGraph,
-): AndroidRuntimeGraph = try {
-    factory()
-} catch (error: Throwable) {
-    runCatching { database.close() }
-        .exceptionOrNull()
-        ?.takeIf { closeError -> closeError !== error }
-        ?.let { closeError -> runCatching { error.addSuppressed(closeError) } }
-    throw error
+    return createAndroidRuntimeGraph(
+        context = context.applicationContext,
+        database = database,
+        activityActions = activityActions,
+        platformName = platformName,
+        logger = logger,
+    )
 }
 
 private fun createAndroidRuntimeGraph(
@@ -361,7 +344,6 @@ private fun createAndroidRuntimeGraph(
     activityActions: AndroidActivityActions,
     platformName: String,
     logger: DiagnosticLogger,
-    ownsDatabase: Boolean,
 ): AndroidRuntimeGraph {
     GlobalDiagnosticLogger.installStrategy(logger)
     val secureStore = AndroidCredentialStore(
@@ -503,8 +485,8 @@ private fun createAndroidRuntimeGraph(
                 ),
                 lyricsShareFontLibraryPlatformService = lyricsShareFontLibraryPlatformService,
                 lyricsShareFontPreferencesStore = appPreferencesStore,
+                playerLyricsStylePreferencesStore = appPreferencesStore,
             ),
-            ownsDatabase = ownsDatabase,
         )
     } catch (error: Throwable) {
         sharedScope.cancel()
@@ -713,10 +695,11 @@ internal class AndroidAppPreferencesStore(
 ) : AppLanguagePreferencesStore, PlaybackPreferencesStore, SambaCachePreferencesStore, ThemePreferencesStore, AppDisplayPreferencesStore,
     CompactPlayerLyricsPreferencesStore, DesktopLyricsPreferencesStore, DesktopLyricsPositionPreferencesStore,
     NavidromeAudioQualityPreferencesStore, LibrarySourceFilterPreferencesStore,
-    LyricsShareFontPreferencesStore, PlaybackDecoderPreferencesStore, PlayerArtworkStylePreferencesStore,
+    LyricsShareFontPreferencesStore, PlayerLyricsStylePreferencesStore, PlaybackDecoderPreferencesStore, PlayerArtworkStylePreferencesStore,
     AndroidEqualizerPreferencesStore, AutoOpenPlayerOnStartupPreferencesStore {
     private val preferences: SharedPreferences =
         context.getSharedPreferences("lynmusic.settings", Context.MODE_PRIVATE)
+    private val sourceFilterMutex = Mutex()
     private val mutableAppLanguage = MutableStateFlow(appLanguageOrDefault(preferences.getString(APP_LANGUAGE_PREFERENCE_KEY, null)))
     override val appLanguage: StateFlow<AppLanguage> = mutableAppLanguage.asStateFlow()
     init { AppLanguageRuntime.install(this, java.util.Locale.getDefault().toLanguageTag()) }
@@ -787,6 +770,9 @@ internal class AndroidAppPreferencesStore(
     private val mutableSelectedTheme = MutableStateFlow(readSelectedTheme())
     private val mutableCustomThemeTokens = MutableStateFlow(readCustomThemeTokens())
     private val mutableTextPalettePreferences = MutableStateFlow(readTextPalettePreferences())
+    private val mutablePlayerLyricsStyle = MutableStateFlow(decodePlayerLyricsStyle(preferences.getString("player_lyrics_style", null)))
+    override val playerLyricsStyle: StateFlow<PlayerLyricsStyle> = mutablePlayerLyricsStyle.asStateFlow()
+
     private val mutableSelectedLyricsShareFontKey = MutableStateFlow(
         preferences.getString(KEY_LYRICS_SHARE_FONT_KEY, null)?.trim()?.takeIf { it.isNotBlank() },
     )
@@ -988,6 +974,12 @@ internal class AndroidAppPreferencesStore(
         mutableNavidromeMobileAudioQuality.value = quality
     }
 
+    override suspend fun setPlayerLyricsStyle(value: PlayerLyricsStyle) {
+        val normalized = value.normalized()
+        preferences.edit().putString("player_lyrics_style", encodePlayerLyricsStyle(normalized)).apply()
+        mutablePlayerLyricsStyle.value = normalized
+    }
+
     override suspend fun setSelectedLyricsShareFontKey(value: String?) {
         val normalizedValue = value?.trim()?.takeIf { it.isNotBlank() }
         preferences.edit().putString(KEY_LYRICS_SHARE_FONT_KEY, normalizedValue).apply()
@@ -995,13 +987,29 @@ internal class AndroidAppPreferencesStore(
     }
 
     override suspend fun setLibrarySourceFilter(filter: LibrarySourceFilter) {
-        preferences.edit().putString(KEY_LIBRARY_SOURCE_FILTER, filter.name).apply()
-        mutableLibrarySourceFilter.value = filter
+        updateSourceFilter(KEY_LIBRARY_SOURCE_FILTER, mutableLibrarySourceFilter, filter)
     }
 
     override suspend fun setFavoritesSourceFilter(filter: LibrarySourceFilter) {
-        preferences.edit().putString(KEY_FAVORITES_SOURCE_FILTER, filter.name).apply()
-        mutableFavoritesSourceFilter.value = filter
+        updateSourceFilter(KEY_FAVORITES_SOURCE_FILTER, mutableFavoritesSourceFilter, filter)
+    }
+
+    override suspend fun compareAndSetLibrarySourceFilter(expected: LibrarySourceFilter, filter: LibrarySourceFilter): Boolean =
+        updateSourceFilter(KEY_LIBRARY_SOURCE_FILTER, mutableLibrarySourceFilter, filter, expected)
+
+    override suspend fun compareAndSetFavoritesSourceFilter(expected: LibrarySourceFilter, filter: LibrarySourceFilter): Boolean =
+        updateSourceFilter(KEY_FAVORITES_SOURCE_FILTER, mutableFavoritesSourceFilter, filter, expected)
+
+    private suspend fun updateSourceFilter(
+        key: String,
+        current: MutableStateFlow<LibrarySourceFilter>,
+        filter: LibrarySourceFilter,
+        expected: LibrarySourceFilter? = null,
+    ): Boolean = sourceFilterMutex.withLock {
+        if (expected != null && current.value != expected) return@withLock false
+        preferences.edit().putString(key, encodeLibrarySourceFilter(filter)).apply()
+        current.value = filter
+        true
     }
 
     override suspend fun setOnlineLibrarySourceId(sourceId: String?) {
@@ -1050,7 +1058,7 @@ internal class AndroidAppPreferencesStore(
 
     private fun readLibrarySourceFilter(key: String): LibrarySourceFilter {
         val name = preferences.getString(key, null)
-        return LibrarySourceFilter.entries.firstOrNull { it.name == name } ?: LibrarySourceFilter.ALL
+        return decodeLibrarySourceFilter(name)
     }
 
     private fun readNullablePreference(key: String): String? {
@@ -2629,6 +2637,7 @@ internal class AndroidPlaybackGateway(
     private val logger: DiagnosticLogger,
     /** Logs in to FN Music before playback; FN Music tracks cannot play without it. */
     private val fnMusicHttpClient: LyricsHttpClient? = null,
+    private val navidromeHttpClient: LyricsHttpClient? = null,
 ) : PlaybackGateway {
     private var activeAndroidExtensionDecoderEnabled =
         playbackDecoderPreferencesStore.useAndroidExtensionDecoder.value
@@ -2644,6 +2653,13 @@ internal class AndroidPlaybackGateway(
     private var currentRemoteLogTag: String? = null
     private var currentRemoteLabel: String? = null
     private var currentRemotePlaybackFallback: AndroidRemotePlaybackFallback? = null
+    private var navidromeSession: AndroidNavidromePlaybackSession? = null
+    private val mutableNavidromeAwaitingPosition = MutableStateFlow(false)
+    internal val navidromeAwaitingPosition: StateFlow<Boolean> = mutableNavidromeAwaitingPosition.asStateFlow()
+    private var navidromeCapabilityJob: Job? = null
+    private val navidromeCapabilities by lazy {
+        navidromeHttpClient?.let { NavidromeTranscodeCapabilities(networkChangeScope, it) }
+    }
     /** The playing FN Music track's stream; it owns the address choice, so fallbacks reload through it. */
     private var currentFnMusicTarget: AndroidFnMusicPlaybackTarget? = null
     private var fnMusicErrorReloads = 0
@@ -2651,9 +2667,36 @@ internal class AndroidPlaybackGateway(
     private var fnMusicLoadedGeneration = 0
     private var pendingLoadPlayWhenReady = false
     private var lastPublishedPlaybackLogKey: String? = null
+    private val navidromeRecoveryFailureHandler = NavidromeRecoveryFailureHandler(
+        isCurrent = { failure -> !released && navidromeSession?.acceptsRecoveryFailure(failure) == true },
+        tryNextAddress = { error ->
+            pendingLoadPlayWhenReady = false
+            tryApplyRemoteAddressFallback(error)
+        },
+        publishFailure = { failure ->
+            pendingLoadPlayWhenReady = false
+            logger.error(PLAYBACK_LOG_TAG, failure.error) {
+                "play-failed locator=${currentRemoteLabel.orEmpty()}"
+            }
+            mutableState.update {
+                it.withAndroidPlaybackFailure(failure.error).copy(isPlaying = false, positionMs = failure.positionMs)
+            }
+        },
+    )
 
     internal val currentPlayer: ExoPlayer
         get() = player
+
+    internal fun acceptedSeekPositionMs(requestedPositionMs: Long): Long =
+        if (navidromeSession != null) mutableState.value.positionMs else requestedPositionMs
+
+    internal val navidromeBufferPositionMs: Long?
+        get() = navidromeSession?.let { session ->
+            if (session.awaitingPosition) session.positionMs
+            else (session.originMs + player.bufferedPosition.coerceAtLeast(0L))
+                .coerceAtLeast(session.positionMs)
+                .let { if (session.durationMs > 0L) it.coerceAtMost(session.durationMs) else it }
+        }
 
     internal var onPlayerRecreated: ((ExoPlayer) -> Unit)? = null
 
@@ -2679,6 +2722,7 @@ internal class AndroidPlaybackGateway(
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (navidromeSession?.isCurrentRequest == false) return
             logger.info(PLAYBACK_LOG_TAG) {
                 "player-is-playing-changed isPlaying=$isPlaying ${playerDebugSummary()}"
             }
@@ -2701,13 +2745,15 @@ internal class AndroidPlaybackGateway(
             logger.info(PLAYBACK_LOG_TAG) {
                 "player-playback-state-changed playbackState=$playbackState ${playerDebugSummary()}"
             }
+            navidromeSession?.reconcile()
             if (playbackState == Player.STATE_ENDED) {
+                if (navidromeSession?.consumeEnded() == false) return
                 pendingLoadPlayWhenReady = false
                 mutableState.update {
                     it.copy(
                         isPlaying = false,
                         positionMs = 0L,
-                        canSeek = player.isCurrentMediaItemSeekable,
+                        canSeek = navidromeSession?.canSeek ?: player.isCurrentMediaItemSeekable,
                         completionCount = it.completionCount + 1,
                     )
                 }
@@ -2720,6 +2766,7 @@ internal class AndroidPlaybackGateway(
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            navidromeSession?.onPlayWhenReadyChanged(playWhenReady, reason)
             logger.warn(PLAYBACK_LOG_TAG) {
                 "player-play-when-ready-changed playWhenReady=$playWhenReady reason=$reason ${playerDebugSummary()}"
             }
@@ -2727,14 +2774,28 @@ internal class AndroidPlaybackGateway(
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            val navidrome = navidromeSession
+            if (navidrome?.isCurrentRequest == false) return
+            val recovery = navidrome?.recoverReadFailure(error) ?: NavidromeReadRecoveryResult.NotApplicable
             pendingLoadPlayWhenReady = false
+            if (recovery == NavidromeReadRecoveryResult.Recovering) {
+                mutableState.update { it.copy(errorMessage = null, errorText = null) }
+                return
+            }
+            navidrome?.onFailure(error)
+            if (navidrome != null) {
+                navidromeRecoveryFailureHandler.handle(navidrome.recoveryFailure(error, recovery))
+                return
+            }
             logger.error(PLAYBACK_LOG_TAG, error) {
                 "play-failed locator=${currentRemoteLabel.orEmpty()}"
             }
             if (tryApplyRemoteAddressFallback(error)) {
                 return
             }
-            mutableState.update { it.withAndroidPlaybackFailure(error) }
+            mutableState.update {
+                it.withAndroidPlaybackFailure(error).copy(isPlaying = false)
+            }
         }
 
         override fun onPositionDiscontinuity(
@@ -2746,12 +2807,14 @@ internal class AndroidPlaybackGateway(
         }
 
         override fun onTracksChanged(tracks: Tracks) {
+            if (navidromeSession?.isCurrentRequest == false) return
             mutableState.update {
                 it.copy(currentPlaybackAudioFormat = tracks.selectedAudioFormat())
             }
         }
 
         override fun onEvents(player: Player, events: Player.Events) {
+            navidromeSession?.reconcile()
             publishPlayerState()
         }
     }
@@ -2784,7 +2847,9 @@ internal class AndroidPlaybackGateway(
         currentFnMusicTarget?.let { target -> return tryRecoverFnMusicStream(target, error) }
         val fallback = currentRemotePlaybackFallback ?: return false
         if (!isRemoteSourceAddressFallbackAllowed(error)) return false
-        return switchRemoteCandidate(fallback, fallback.selectedIndex + 1, reason = "retry")
+        val nextIndex = (fallback.selectedIndex + 1 until fallback.candidates.size)
+            .firstOrNull { navidromeSession?.canReload(fallback.candidates[it].value) != false } ?: return false
+        return switchRemoteCandidate(fallback, nextIndex, reason = "retry")
     }
 
     /**
@@ -2847,7 +2912,8 @@ internal class AndroidPlaybackGateway(
             candidateKinds = fallback.candidates.map { it.kind },
             currentIndex = fallback.selectedIndex,
             networkState = networkState,
-            isPlaybackActive = player.playbackState != Player.STATE_ENDED && player.playbackState != Player.STATE_IDLE,
+            isPlaybackActive = navidromeSession?.isRecoveringPosition == true ||
+                (player.playbackState != Player.STATE_ENDED && player.playbackState != Player.STATE_IDLE),
         ) ?: return
         switchRemoteCandidate(fallback, targetIndex, reason = "network-change")
     }
@@ -2858,12 +2924,18 @@ internal class AndroidPlaybackGateway(
         reason: String,
     ): Boolean {
         val nextCandidate = fallback.candidates.getOrNull(targetIndex) ?: return false
+        if (navidromeSession?.canReload(nextCandidate.value) == false) return false
         val retryPositionMs = player.currentPosition.takeIf { it >= 0L } ?: 0L
         val retryPlayWhenReady = player.playWhenReady || pendingLoadPlayWhenReady
         currentRemotePlaybackFallback = fallback.copy(selectedIndex = targetIndex)
         currentRemoteLabel = redactRemoteSourceUrlForLog(nextCandidate.value)
         logger.warn(PLAYBACK_LOG_TAG) {
             "remote-address-fallback $reason index=$targetIndex url=${redactRemoteSourceUrlForLog(nextCandidate.value)}"
+        }
+        navidromeSession?.let { session ->
+            session.reload(nextCandidate.value)
+            mutableState.update { it.copy(errorMessage = null, errorText = null) }
+            return true
         }
         player.setMediaItem(MediaItem.fromUri(Uri.parse(nextCandidate.value)))
         player.prepare()
@@ -2874,6 +2946,7 @@ internal class AndroidPlaybackGateway(
     }
 
     private val networkChangeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
 
     init {
         player.addListener(playerListener)
@@ -2975,6 +3048,12 @@ internal class AndroidPlaybackGateway(
             } else {
                 null
             }
+            val navidromeSource = if (subsonicCompatible?.sourceType == ImportSourceType.NAVIDROME &&
+                navidromeAudioQuality != null && navidromeAudioQuality != NavidromeAudioQuality.Original &&
+                navidromeHttpClient != null
+            ) {
+                resolveNavidromeSource(database, secureCredentialStore, track.mediaLocator, addressSelector)
+            } else null
             val resolvedUri = if (offlineTarget != null) {
                 Uri.fromFile(offlineTarget.file)
             } else if (webDavTarget == null && fnMusicTarget == null && sambaTarget == null) {
@@ -3033,13 +3112,52 @@ internal class AndroidPlaybackGateway(
                     currentRemotePlaybackFallback = remotePlaybackCandidates?.takeIf { it.isNotEmpty() }?.let { candidates ->
                         AndroidRemotePlaybackFallback(candidates = candidates, selectedIndex = 0)
                     }
-                    player.setMediaItem(MediaItem.fromUri(checkNotNull(resolvedUri)))
+                    if (navidromeSource != null) {
+                        val session = AndroidNavidromePlaybackSession(
+                            driver = ExoNavidromePlaybackDriver(player),
+                            url = checkNotNull(resolvedUri).toString(),
+                            durationMs = track.durationMs,
+                            playWhenReady = playWhenReady,
+                            startPositionMs = startPositionMs,
+                            changed = {
+                                publishPlayerState()
+                                if (shouldKeepTickerRunning()) ensureProgressTicker()
+                            },
+                            recoveryFailed = navidromeRecoveryFailureHandler::handle,
+                            logger = logger,
+                            currentRequest = { !released && loadToken.isCurrent() },
+                            recoveryStarted = {
+                                mutableState.update { it.copy(errorMessage = null, errorText = null) }
+                            },
+                            refreshSupport = { accept ->
+                                navidromeCapabilityJob?.cancel()
+                                navidromeCapabilityJob = networkChangeScope.launch {
+                                    val support = checkNotNull(navidromeCapabilities).support(navidromeSource)
+                                    onPlayerThread {
+                                        if (!released && loadToken.isCurrent()) accept(support)
+                                    }
+                                }
+                            },
+                        )
+                        navidromeSession = session
+                        session.start()
+                        navidromeCapabilityJob = networkChangeScope.launch {
+                            val support = checkNotNull(navidromeCapabilities).support(navidromeSource)
+                            onPlayerThread {
+                                if (!released && navidromeSession === session && loadToken.isCurrent()) session.updateSupport(support)
+                            }
+                        }
+                    } else {
+                        player.setMediaItem(MediaItem.fromUri(checkNotNull(resolvedUri)))
+                    }
                 }
                 mutableState.update {
                     it.copy(currentNavidromeAudioQuality = navidromeAudioQuality)
                 }
-                player.prepare()
-                player.seekTo(startPositionMs)
+                if (navidromeSession == null) {
+                    player.prepare()
+                    player.seekTo(startPositionMs)
+                }
                 logger.info(PLAYBACK_LOG_TAG) {
                     "load-player-prepared request=${loadToken.requestId} track=${track.id} ${playerDebugSummary()}"
                 }
@@ -3066,6 +3184,11 @@ internal class AndroidPlaybackGateway(
                 return@onPlayerThread
             }
             pendingLoadPlayWhenReady = playWhenReady
+            navidromeCapabilityJob?.cancel()
+            navidromeCapabilityJob = null
+            navidromeSession?.close()
+            navidromeSession = null
+            mutableNavidromeAwaitingPosition.value = false
             logger.warn(PLAYBACK_LOG_TAG) {
                 "load-stop-and-reset request=${loadToken.requestId} playWhenReady=$playWhenReady before ${playerDebugSummary()}"
             }
@@ -3107,6 +3230,10 @@ internal class AndroidPlaybackGateway(
             val previousHandler = playerHandler
             val previousPlayer = player
             val volume = previousPlayer.volume
+            navidromeCapabilityJob?.cancel()
+            navidromeSession?.close()
+            navidromeSession = null
+            mutableNavidromeAwaitingPosition.value = false
             previousHandler.removeCallbacks(progressTicker)
             progressTickerRunning = false
             previousPlayer.removeListener(playerListener)
@@ -3130,7 +3257,7 @@ internal class AndroidPlaybackGateway(
             logger.warn(PLAYBACK_LOG_TAG) {
                 "gateway-play-request ${playerDebugSummary()}"
             }
-            player.play()
+            navidromeSession?.takeIf { it.isCurrentRequest }?.setPlaying(true) ?: player.play()
         }
     }
 
@@ -3140,12 +3267,17 @@ internal class AndroidPlaybackGateway(
                 "gateway-pause-request ${playerDebugSummary()}"
             }
             pendingLoadPlayWhenReady = false
-            player.pause()
+            navidromeSession?.takeIf { it.isCurrentRequest }?.setPlaying(false) ?: player.pause()
         }
     }
 
     override suspend fun seekTo(positionMs: Long) {
         onPlayerThread {
+            navidromeSession?.let { session ->
+                if (session.canSeek) mutableState.update { it.copy(errorMessage = null, errorText = null) }
+                session.seek(positionMs)
+                return@onPlayerThread
+            }
             if (!player.isCurrentMediaItemSeekable) {
                 publishPlayerState()
                 return@onPlayerThread
@@ -3164,12 +3296,16 @@ internal class AndroidPlaybackGateway(
 
     override suspend fun release() {
         released = true
+        navidromeCapabilityJob?.cancel()
         networkChangeScope.cancel()
         onPlayerRecreated = null
         equalizerController.release()
         playerHandler.removeCallbacks(progressTicker)
         onPlayerThread {
             pendingLoadPlayWhenReady = false
+            navidromeSession?.close()
+            navidromeSession = null
+            mutableNavidromeAwaitingPosition.value = false
             player.release()
             currentFnMusicTarget?.stream?.close()
             currentFnMusicTarget = null
@@ -3296,9 +3432,14 @@ internal class AndroidPlaybackGateway(
     }
 
     private fun publishPlayerState() {
+        val navidrome = navidromeSession
+        if (navidrome?.isCurrentRequest == false) return
+        if (navidrome?.replacing == true) return
+        mutableNavidromeAwaitingPosition.value = navidrome?.awaitingPosition == true
         mutableState.update {
-            val duration = player.duration.takeIf { value -> value > 0 } ?: 0L
+            val duration = navidrome?.durationMs ?: (player.duration.takeIf { value -> value > 0 } ?: 0L)
             val nextIsPlaying = pendingLoadPlayWhenReady ||
+                (navidrome?.awaitingPosition == true && navidrome.wantsPlayback) ||
                 player.isPlaying ||
                 (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING)
             val logKey = listOf(
@@ -3318,9 +3459,9 @@ internal class AndroidPlaybackGateway(
             }
             it.copy(
                 isPlaying = nextIsPlaying,
-                positionMs = player.currentPosition.coerceAtLeast(0L),
+                positionMs = navidrome?.positionMs ?: player.currentPosition.coerceAtLeast(0L),
                 durationMs = if (duration > 0) duration else it.durationMs,
-                canSeek = player.isCurrentMediaItemSeekable,
+                canSeek = navidrome?.canSeek ?: player.isCurrentMediaItemSeekable,
                 volume = player.volume,
             )
         }
@@ -3344,13 +3485,19 @@ internal class AndroidPlaybackGateway(
 
     @UnstableApi
     private fun createPlayer(useAndroidExtensionDecoder: Boolean): ExoPlayer {
+        val mediaSourceFactory = DefaultMediaSourceFactory(context).setDataSourceFactory(
+            DefaultDataSource.Factory(
+                context,
+                DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true),
+            ),
+        )
         return if (useAndroidExtensionDecoder) {
             ExoPlayer.Builder(
                 context,
                 DefaultRenderersFactory(context).setExtensionRendererMode(
                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER,
                 ),
-            ).build()
+            ).setMediaSourceFactory(mediaSourceFactory).build()
             //如果引入LibflacAudioRenderer需要使用下面的方式，因为它会在 extractor 阶段就用 libFLAC 解码，输出的 sampleMimeType 直接是 audio/raw。
             //webdav 和 samba 也要改 ，这里对他们不生效，他们自定义了 media source
 //            val mediaSourceFactory = DefaultMediaSourceFactory(
@@ -3372,7 +3519,7 @@ internal class AndroidPlaybackGateway(
                 DefaultRenderersFactory(context).setExtensionRendererMode(
                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
                 ),
-            ).build()
+            ).setMediaSourceFactory(mediaSourceFactory).build()
         }
     }
 }

@@ -1,14 +1,10 @@
-import com.android.build.gradle.internal.api.BaseVariantOutputImpl
 import org.gradle.api.tasks.Copy
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 val sharedVersionConfig = rootProject.readSharedVersionConfig()
-val appVersionCode = sharedVersionConfig.getValue("APP_VERSION_CODE").toInt()
-val appVersionName = sharedVersionConfig.getValue("APP_VERSION_NAME")
 val desktopPackageVersion = sharedVersionConfig
     .getValue("APP_DESKTOP_PACKAGE_VERSION")
-val androidArtifactBaseName = "LynMusic-$appVersionName"
 val desktopConsoleEnabled: Boolean? = providers.gradleProperty("desktopConsole")
     .map(String::toBoolean)
     .orElse(false)
@@ -21,7 +17,7 @@ fun String.shellQuote(): String = "'${replace("'", "'\"'\"'")}'"
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.androidKmpLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
@@ -30,31 +26,20 @@ plugins {
 kotlin {
     jvmToolchain(21)
 
-    androidTarget {
+    android {
+        namespace = "top.iwesley.lyn.music.composeapp"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        androidResources.enable = true
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_21)
         }
-    }
-
-    listOf(
-        iosArm64(),
-        iosSimulatorArm64()
-    ).forEach { iosTarget ->
-        iosTarget.binaries.framework {
-            baseName = "ComposeApp"
-            isStatic = true
+        withHostTest {
+            isIncludeAndroidResources = true
+            targetSdk { version = release(libs.versions.android.targetSdk.get().toInt()) }
         }
     }
 
-    listOf(
-        macosArm64(),
-    ).forEach { macTarget ->
-        macTarget.binaries.framework {
-            baseName = "ComposeApp"
-            isStatic = false
-        }
-    }
-    
     jvm {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_21)
@@ -62,34 +47,20 @@ kotlin {
     }
 
     sourceSets {
-        val applePlaybackMain by creating {
-            dependsOn(commonMain.get())
-        }
-        val skiaLyricsShareMain by creating {
-            dependsOn(commonMain.get())
-        }
-        val iosMain by creating {
-            dependsOn(applePlaybackMain)
-            dependsOn(skiaLyricsShareMain)
-            dependencies {
-                implementation(libs.ktor.client.darwin)
+        // These shared fixtures are compiled only into test source sets.
+        listOf("commonTest", "jvmTest", "androidHostTest").forEach { sourceSetName ->
+            named(sourceSetName) {
+                kotlin.srcDir(rootProject.file("tools/test-fixtures/src/$sourceSetName/kotlin"))
             }
         }
-        val macosMain by creating {
-            dependsOn(applePlaybackMain)
-        }
-        val iosArm64Main by getting {
-            dependsOn(iosMain)
-        }
-        val iosSimulatorArm64Main by getting {
-            dependsOn(iosMain)
-        }
-        val macosArm64Main by getting {
-            dependsOn(macosMain)
-        }
-        val jvmMain by getting {
-            dependsOn(skiaLyricsShareMain)
+        named("androidHostTest") {
             dependencies {
+                implementation(libs.robolectric)
+            }
+        }
+        getByName("jvmMain") {
+            dependencies {
+                implementation(project(":ui:desktop"))
                 implementation(compose.desktop.currentOs)
                 implementation(libs.compose.material3)
                 implementation(libs.kotlinx.coroutinesSwing)
@@ -100,17 +71,15 @@ kotlin {
                 implementation(libs.androidx.sqlite.bundled)
             }
         }
-        androidMain.dependencies {
-            implementation(project(":android:runtime"))
-            implementation(libs.androidx.activity.compose)
-        }
+
         commonMain.dependencies {
             implementation(project(":shared:resources"))
             implementation(project(":shared:core"))
             implementation(project(":shared:data"))
             implementation(project(":shared:features"))
             implementation(project(":player:core"))
-            implementation(project(":player:app"))
+            implementation(project(":app:runtime"))
+            implementation(project(":ui:common"))
             implementation(libs.androidx.room.runtime)
         }
         commonTest.dependencies {
@@ -123,58 +92,7 @@ kotlin {
     }
 }
 
-android {
-    namespace = "top.iwesley.lyn.music"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-    ndkVersion = libs.versions.android.ndk.get()
-
-    defaultConfig {
-        applicationId = "top.iwesley.lyn.music"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = appVersionCode
-        versionName = appVersionName
-    }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
-        }
-        jniLibs {
-            keepDebugSymbols.clear()
-        }
-    }
-    configureLynReleaseSigning(rootProject)
-    buildTypes {
-        getByName("release") {
-            isMinifyEnabled = false
-        }
-    }
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a", "armeabi-v7a")
-            isUniversalApk = true
-        }
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
-    }
-    lint {
-        //checkOnly += setOf("NewApi")
-        error += setOf("NewApi")
-        abortOnError = true
-        checkDependencies = true
-    }
-}
-
-dependencies {
-    debugImplementation(libs.compose.uiTooling)
-}
-
-val compileJvmMacOsNowPlayingBridge by tasks.registering(Exec::class) {
+val compileJvmMacOsNowPlayingBridge = tasks.register<Exec>("compileJvmMacOsNowPlayingBridge") {
     val swiftSources = fileTree(layout.projectDirectory.dir("src/jvmMacosMain/swift")) {
         include("*.swift")
     }
@@ -225,27 +143,6 @@ tasks.named<Copy>("jvmProcessResources") {
         from(jvmMacOsNowPlayingBridgeOutput) {
             into("native/macos")
         }
-    }
-}
-
-if (rootProject.isAndroidLintOnAssembleEnabled()) {
-    androidComponents {
-        onVariants { variant ->
-            val variantName = variant.name.replaceFirstChar { it.titlecase() }
-            tasks.matching { it.name == "assemble$variantName" }.configureEach {
-                dependsOn("lint$variantName")
-            }
-        }
-    }
-}
-
-android.applicationVariants.configureEach {
-    val hasMultipleOutputs = outputs.size > 1
-    outputs.configureEach {
-        val abiFilter = filters.find { it.filterType == "ABI" }?.identifier
-        val outputLabel = abiFilter ?: if (hasMultipleOutputs) "universal" else null
-        val outputSuffix = listOfNotNull(buildType.name, outputLabel).joinToString("-")
-        (this as BaseVariantOutputImpl).outputFileName = "$androidArtifactBaseName-$outputSuffix.apk"
     }
 }
 

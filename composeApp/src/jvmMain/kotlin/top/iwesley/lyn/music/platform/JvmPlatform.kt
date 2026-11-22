@@ -119,6 +119,10 @@ import top.iwesley.lyn.music.core.model.PlaybackLoadToken
 import top.iwesley.lyn.music.core.model.PlaybackPreferencesStore
 import top.iwesley.lyn.music.core.model.PlayerArtworkStyle
 import top.iwesley.lyn.music.core.model.PlayerArtworkStylePreferencesStore
+import top.iwesley.lyn.music.core.model.PlayerLyricsStyle
+import top.iwesley.lyn.music.core.model.PlayerLyricsStylePreferencesStore
+import top.iwesley.lyn.music.core.model.encodePlayerLyricsStyle
+import top.iwesley.lyn.music.core.model.decodePlayerLyricsStyle
 import top.iwesley.lyn.music.core.model.LyricsShareFontPreferencesStore
 import top.iwesley.lyn.music.core.model.JvmAppDataDirectory
 import top.iwesley.lyn.music.core.model.DEFAULT_PLAYBACK_VOLUME
@@ -196,6 +200,8 @@ import top.iwesley.lyn.music.domain.testEmbyConnection
 import top.iwesley.lyn.music.domain.testNavidromeConnection
 import top.iwesley.lyn.music.domain.testSubsonicConnection
 import top.iwesley.lyn.music.feature.library.LibrarySourceFilter
+import top.iwesley.lyn.music.feature.library.encodeLibrarySourceFilter
+import top.iwesley.lyn.music.feature.library.decodeLibrarySourceFilter
 import top.iwesley.lyn.music.feature.library.LibrarySourceFilterPreferencesStore
 import top.iwesley.lyn.music.feature.library.TrackSortMode
 import com.hierynomus.msdtyp.AccessMask
@@ -369,6 +375,7 @@ fun createJvmAppComponent(
             lyricsSharePlatformService = JvmLyricsSharePlatformService(lyricsShareFontLibraryPlatformService),
             lyricsShareFontLibraryPlatformService = lyricsShareFontLibraryPlatformService,
             lyricsShareFontPreferencesStore = appPreferencesStore,
+                playerLyricsStylePreferencesStore = appPreferencesStore,
             systemPlaybackControlsPlatformService = systemPlaybackControls.service,
             menuBarLyricsControlsPlatformService = menuBarLyricsControls.service,
             closeDesktopResources = { resourceGuard.closeAll().getOrThrow() },
@@ -495,7 +502,7 @@ internal class JvmAppPreferencesStore(
 ) : AppLanguagePreferencesStore, PlaybackPreferencesStore, SambaCachePreferencesStore, ThemePreferencesStore,
     CompactPlayerLyricsPreferencesStore, DesktopLyricsPreferencesStore, DesktopLyricsPositionPreferencesStore,
     MenuBarLyricsControlsPreferencesStore,
-    DesktopVlcPreferencesStore, LyricsShareFontPreferencesStore, PlayerArtworkStylePreferencesStore,
+    DesktopVlcPreferencesStore, LyricsShareFontPreferencesStore, PlayerLyricsStylePreferencesStore, PlayerArtworkStylePreferencesStore,
     LibrarySourceFilterPreferencesStore, WindowClosePreferencesStore, AutoOpenPlayerOnStartupPreferencesStore {
     private val propertiesFile = JvmSettingsPropertiesFile(settingsFile)
     private val mutableAppLanguage = MutableStateFlow(appLanguageOrDefault(readNullablePreference(APP_LANGUAGE_PREFERENCE_KEY)))
@@ -544,6 +551,9 @@ internal class JvmAppPreferencesStore(
             autoDetectedPath = mutableDesktopVlcAutoDetectedPath.value,
         ),
     )
+    private val mutablePlayerLyricsStyle = MutableStateFlow(decodePlayerLyricsStyle(readNullablePreference("player_lyrics_style")))
+    override val playerLyricsStyle: StateFlow<PlayerLyricsStyle> = mutablePlayerLyricsStyle.asStateFlow()
+
     private val mutableSelectedLyricsShareFontKey = MutableStateFlow(readSelectedLyricsShareFontKey())
 
     override val useSambaCache: StateFlow<Boolean> = mutableUseSambaCache.asStateFlow()
@@ -659,18 +669,29 @@ internal class JvmAppPreferencesStore(
     }
 
     override suspend fun setLibrarySourceFilter(filter: LibrarySourceFilter) {
-        updateProperties(
-            mutate = { setProperty(KEY_LIBRARY_SOURCE_FILTER, filter.name) },
-            onPersisted = { mutableLibrarySourceFilter.value = filter },
-        )
+        updateSourceFilter(KEY_LIBRARY_SOURCE_FILTER, mutableLibrarySourceFilter, filter)
     }
 
     override suspend fun setFavoritesSourceFilter(filter: LibrarySourceFilter) {
-        updateProperties(
-            mutate = { setProperty(KEY_FAVORITES_SOURCE_FILTER, filter.name) },
-            onPersisted = { mutableFavoritesSourceFilter.value = filter },
-        )
+        updateSourceFilter(KEY_FAVORITES_SOURCE_FILTER, mutableFavoritesSourceFilter, filter)
     }
+
+    override suspend fun compareAndSetLibrarySourceFilter(expected: LibrarySourceFilter, filter: LibrarySourceFilter): Boolean =
+        updateSourceFilter(KEY_LIBRARY_SOURCE_FILTER, mutableLibrarySourceFilter, filter, expected)
+
+    override suspend fun compareAndSetFavoritesSourceFilter(expected: LibrarySourceFilter, filter: LibrarySourceFilter): Boolean =
+        updateSourceFilter(KEY_FAVORITES_SOURCE_FILTER, mutableFavoritesSourceFilter, filter, expected)
+
+    private suspend fun updateSourceFilter(
+        key: String,
+        current: MutableStateFlow<LibrarySourceFilter>,
+        filter: LibrarySourceFilter,
+        expected: LibrarySourceFilter? = null,
+    ): Boolean = propertiesFile.updateIf(
+        condition = { expected == null || current.value == expected },
+        mutate = { setProperty(key, encodeLibrarySourceFilter(filter)) },
+        onPersisted = { current.value = filter },
+    )
 
     override suspend fun setOnlineLibrarySourceId(sourceId: String?) {
         val normalizedSourceId = normalizeNullablePreference(sourceId)
@@ -769,6 +790,14 @@ internal class JvmAppPreferencesStore(
         )
     }
 
+    override suspend fun setPlayerLyricsStyle(value: PlayerLyricsStyle) {
+        val normalized = value.normalized()
+        updateProperties(
+            mutate = { setProperty("player_lyrics_style", encodePlayerLyricsStyle(normalized)) },
+            onPersisted = { mutablePlayerLyricsStyle.value = normalized },
+        )
+    }
+
     override suspend fun setSelectedLyricsShareFontKey(value: String?) {
         val normalizedValue = value?.trim()?.takeIf { it.isNotBlank() }
         updateProperties(
@@ -832,7 +861,7 @@ internal class JvmAppPreferencesStore(
 
     private fun readLibrarySourceFilter(key: String): LibrarySourceFilter {
         val name = loadProperties().getProperty(key)
-        return LibrarySourceFilter.entries.firstOrNull { it.name == name } ?: LibrarySourceFilter.ALL
+        return decodeLibrarySourceFilter(name)
     }
 
     private fun readNullablePreference(key: String): String? {
@@ -949,11 +978,19 @@ internal class JvmSettingsPropertiesFile(
         mutate: Properties.() -> Unit,
         onPersisted: () -> Unit = {},
     ) {
-        updateMutex.withLock {
-            val properties = load().apply(mutate)
-            persist(properties)
-            onPersisted()
-        }
+        updateIf(condition = { true }, mutate = mutate, onPersisted = onPersisted)
+    }
+
+    suspend fun updateIf(
+        condition: () -> Boolean,
+        mutate: Properties.() -> Unit,
+        onPersisted: () -> Unit = {},
+    ): Boolean = updateMutex.withLock {
+        if (!condition()) return@withLock false
+        val properties = load().apply(mutate)
+        persist(properties)
+        onPersisted()
+        true
     }
 
     private fun persist(properties: Properties) {

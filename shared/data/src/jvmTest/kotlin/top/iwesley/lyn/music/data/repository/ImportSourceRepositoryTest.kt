@@ -47,6 +47,8 @@ import top.iwesley.lyn.music.core.model.buildEmbySongLocator
 import top.iwesley.lyn.music.core.model.normalizeWebDavRootUrl
 import top.iwesley.lyn.music.data.db.FavoriteTrackEntity
 import top.iwesley.lyn.music.data.db.ImportSourceEntity
+import top.iwesley.lyn.music.data.db.PlaylistEntity
+import top.iwesley.lyn.music.data.db.PlaylistTrackEntity
 import top.iwesley.lyn.music.data.db.TrackEntity
 import top.iwesley.lyn.music.data.db.LynMusicDatabase
 import top.iwesley.lyn.music.data.db.buildLynMusicDatabase
@@ -59,9 +61,143 @@ import top.iwesley.lyn.music.core.model.UiTextException
 import top.iwesley.lyn.music.core.model.lastErrorUiText
 import top.iwesley.lyn.music.core.model.resolveUiText
 import top.iwesley.lyn.music.core.model.uiText
+import top.iwesley.lyn.music.core.model.uiErrorText
 import top.iwesley.lyn.music.resources.*
 
 class ImportSourceRepositoryTest {
+    @Test
+    fun `remote address sources preserve single and dual addresses through testing saving editing and rescanning`() = runTest {
+        val lanUrl = "https://lan.example"
+        val wanUrl = "https://wan.example"
+        val types = listOf(ImportSourceType.NAVIDROME, ImportSourceType.SUBSONIC, ImportSourceType.EMBY, ImportSourceType.FN_MUSIC)
+        for (type in types) {
+            for ((lanInput, wanInput) in listOf(" $lanUrl/ " to " \t ", " \t " to " $wanUrl/ ", lanUrl to wanUrl)) {
+                val database = createImportTestDatabase()
+                try {
+                    val gateway = RecordingImportSourceGateway()
+                    val credentials = ImportTestSecureCredentialStore()
+                    val repository = createRepository(database, gateway, credentials)
+                    val lan = if (lanInput.isBlank()) "" else lanUrl
+                    val wan = if (wanInput.isBlank()) "" else wanUrl
+                    val available = listOf(lan, wan).filter(String::isNotBlank).toSet()
+                    val preferred = lan.ifBlank { wan }
+                    val navidrome = NavidromeSourceDraft("Address source", lanInput, wanInput, "user", "secret")
+                    val subsonic = SubsonicSourceDraft("Address source", lanInput, wanInput, "user", "secret")
+                    val emby = EmbySourceDraft("Address source", lanInput, wanInput, "user", "secret")
+                    val fnMusic = FnMusicSourceDraft("Address source", baseUrl = lanInput, wanBaseUrl = wanInput, username = "user", password = "secret")
+
+                    val tested = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.testNavidromeSource(navidrome)
+                        ImportSourceType.SUBSONIC -> repository.testSubsonicSource(subsonic)
+                        ImportSourceType.EMBY -> repository.testEmbySource(emby)
+                        ImportSourceType.FN_MUSIC -> repository.testFnMusicSource(fnMusic)
+                        else -> error("Unexpected source")
+                    }
+                    tested.getOrThrow()
+                    assertEquals(available, gateway.remoteAddressCalls.map { it.second }.toSet(), "$type connection test")
+                    gateway.remoteAddressCalls.clear()
+
+                    val saved = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.addNavidromeSource(navidrome)
+                        ImportSourceType.SUBSONIC -> repository.addSubsonicSource(subsonic)
+                        ImportSourceType.EMBY -> repository.addEmbySource(emby)
+                        ImportSourceType.FN_MUSIC -> repository.addFnMusicSource(fnMusic)
+                    }.getOrThrow()
+                    assertEquals(setOf(preferred), gateway.remoteAddressCalls.map { it.second }.toSet(), "$type import")
+                    gateway.remoteAddressCalls.clear()
+                    val original = assertNotNull(database.importSourceDao().getById(saved.sourceId))
+                    val secret = credentials.get(assertNotNull(original.credentialKey))
+                    assertEquals(lan, original.rootReference)
+                    assertEquals(wan.takeIf(String::isNotBlank), original.wanRootReference)
+
+                    val updatedTest = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.testUpdatedNavidromeSource(saved.sourceId, navidrome.copy(password = ""))
+                        ImportSourceType.SUBSONIC -> repository.testUpdatedSubsonicSource(saved.sourceId, subsonic.copy(credential = ""))
+                        ImportSourceType.EMBY -> repository.testUpdatedEmbySource(saved.sourceId, emby.copy(password = ""))
+                        ImportSourceType.FN_MUSIC -> repository.testUpdatedFnMusicSource(saved.sourceId, fnMusic.copy(password = ""))
+                    }
+                    updatedTest.getOrThrow()
+                    assertEquals(available, gateway.remoteAddressCalls.map { it.second }.toSet(), "$type retained credential test")
+                    gateway.remoteAddressCalls.clear()
+
+                    val updated = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.updateNavidromeSource(saved.sourceId, navidrome.copy(password = ""))
+                        ImportSourceType.SUBSONIC -> repository.updateSubsonicSource(saved.sourceId, subsonic.copy(credential = ""))
+                        ImportSourceType.EMBY -> repository.updateEmbySource(saved.sourceId, emby.copy(password = ""))
+                        ImportSourceType.FN_MUSIC -> repository.updateFnMusicSource(saved.sourceId, fnMusic.copy(password = ""))
+                    }
+                    updated.getOrThrow()
+                    assertEquals(setOf(preferred), gateway.remoteAddressCalls.map { it.second }.toSet(), "$type update")
+                    gateway.remoteAddressCalls.clear()
+                    repository.rescanSource(saved.sourceId).getOrThrow()
+                    assertEquals(setOf(preferred), gateway.remoteAddressCalls.map { it.second }.toSet(), "$type rescan")
+                    assertTrue(gateway.remoteAddressCalls.all { it.first == type })
+                    val stored = assertNotNull(database.importSourceDao().getById(saved.sourceId))
+                    assertEquals(lan, stored.rootReference)
+                    assertEquals(wan.takeIf(String::isNotBlank), stored.wanRootReference)
+                    assertEquals(original.credentialKey, stored.credentialKey)
+                    assertEquals(secret, credentials.get(assertNotNull(stored.credentialKey)))
+                    when (type) {
+                        ImportSourceType.NAVIDROME -> assertEquals("secret", gateway.lastNavidromeScanDraft?.password)
+                        ImportSourceType.SUBSONIC -> assertEquals("secret", gateway.lastSubsonicScanDraft?.credential)
+                        ImportSourceType.EMBY -> assertEquals(EmbyCredential("user-1", "emby-token"), gateway.lastEmbyScanCredential)
+                        ImportSourceType.FN_MUSIC -> assertEquals("secret", gateway.fnMusicScanDrafts.last().password)
+                    }
+                } finally {
+                    database.close()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `remote sources reject empty and invalid address pairs without contacting gateways or saving state`() = runTest {
+        val types = listOf(ImportSourceType.NAVIDROME, ImportSourceType.SUBSONIC, ImportSourceType.EMBY, ImportSourceType.FN_MUSIC)
+        for (type in types) {
+            for ((lan, wan) in listOf("" to "", " \t " to " ", "invalid" to "", "" to "invalid")) {
+                val database = createImportTestDatabase()
+                try {
+                    val gateway = RecordingImportSourceGateway()
+                    val repository = createRepository(database, gateway)
+                    val navidrome = NavidromeSourceDraft("Address source", lan, wan, "user", "secret")
+                    val subsonic = SubsonicSourceDraft("Address source", lan, wan, "user", "secret")
+                    val emby = EmbySourceDraft("Address source", lan, wan, "user", "secret")
+                    val fnMusic = FnMusicSourceDraft("Address source", baseUrl = lan, wanBaseUrl = wan, username = "user", password = "secret")
+                    val tested = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.testNavidromeSource(navidrome)
+                        ImportSourceType.SUBSONIC -> repository.testSubsonicSource(subsonic)
+                        ImportSourceType.EMBY -> repository.testEmbySource(emby)
+                        ImportSourceType.FN_MUSIC -> repository.testFnMusicSource(fnMusic)
+                        else -> error("Unexpected source")
+                    }
+                    val saved = when (type) {
+                        ImportSourceType.NAVIDROME -> repository.addNavidromeSource(navidrome)
+                        ImportSourceType.SUBSONIC -> repository.addSubsonicSource(subsonic)
+                        ImportSourceType.EMBY -> repository.addEmbySource(emby)
+                        ImportSourceType.FN_MUSIC -> repository.addFnMusicSource(fnMusic)
+                    }
+                    val name = when (type) {
+                        ImportSourceType.NAVIDROME -> "Navidrome"
+                        ImportSourceType.SUBSONIC -> "Subsonic"
+                        ImportSourceType.EMBY -> "Emby"
+                        ImportSourceType.FN_MUSIC -> "FN Music"
+                    }
+                    for (failure in listOf(tested.exceptionOrNull(), saved.exceptionOrNull())) {
+                        val text = kotlin.test.assertIs<UiText.StringRef>(assertNotNull(failure).uiErrorText())
+                        val argument = text.arguments.single()
+                        assertEquals(name, if (argument is UiText) resolveUiText(argument, AppLanguage.English) else argument)
+                        assertEquals(if (lan.isBlank() && wan.isBlank()) "source_server_address_required" else "server_address_invalid", text.resource.key)
+                    }
+                    assertTrue(gateway.remoteAddressCalls.isEmpty())
+                    assertTrue(database.importSourceDao().getAll().isEmpty())
+                    assertEquals(0, database.trackDao().count())
+                } finally {
+                    database.close()
+                }
+            }
+        }
+    }
+
     @Test
     fun `normal and streaming warnings keep save-time language after reopening without repeating scans`() = runTest {
         val previous = AppLanguageRuntime.appLanguage.value
@@ -1410,7 +1546,7 @@ class ImportSourceRepositoryTest {
                 wanBaseUrl = "https://music.example.com",
                 username = " demo ",
                 password = "secret",
-                accessCode = "ignored",
+                accessCode = "1234",
             ),
         ).getOrThrow()
 
@@ -1423,9 +1559,57 @@ class ImportSourceRepositoryTest {
         assertEquals("https://music.example.com", stored.wanRootReference)
         assertEquals("demo", stored.username)
         assertEquals("secret", credentials.get("credential-${summary.sourceId}"))
-        assertNull(credentials.get(fnMusicAccessCodeCredentialKey(summary.sourceId)))
+        assertEquals("1234", gateway.fnMusicTestDrafts.single().accessCode)
+        assertEquals("1234", credentials.get(fnMusicAccessCodeCredentialKey(summary.sourceId)))
         val track = database.trackDao().getAll().single()
         assertEquals("track:${summary.sourceId}:fnmusic:Guid-1", track.id)
+    }
+
+    @Test
+    fun `rescanning FN Music replaces virtual paths while preserving track identity and references`() = runTest {
+        val database = createImportTestDatabase()
+        try {
+            var relativePath = "Artist/Album/画.flac"
+            val gateway = RecordingImportSourceGateway(
+                fnMusicScanReportFactory = { sourceId ->
+                    ImportScanReport(
+                        tracks = listOf(
+                            ImportedTrackCandidate(
+                                title = "画",
+                                mediaLocator = buildFnMusicSongLocator(sourceId, "Guid-1"),
+                                relativePath = relativePath,
+                            ),
+                        ),
+                        discoveredAudioFileCount = 1,
+                    )
+                },
+            )
+            val repository = createRepository(database, gateway)
+            val sourceId = repository.addFnMusicSource(
+                FnMusicSourceDraft("NAS", FnMusicConnectionMode.ADDRESS, baseUrl = "http://nas:5666", username = "demo", password = "secret"),
+            ).getOrThrow().sourceId
+            val original = database.trackDao().getBySourceId(sourceId).single().copy(addedAt = 10L)
+            database.trackDao().upsertAll(listOf(original))
+            val favorite = FavoriteTrackEntity(original.id, sourceId, remoteSongId = "Guid-1", favoritedAt = 11L)
+            val playlistTrack = PlaylistTrackEntity("playlist-1", original.id, sourceId, addedAt = 12L, localOrdinal = 0, remoteOrdinal = null)
+            database.favoriteTrackDao().upsert(favorite)
+            database.playlistDao().upsert(PlaylistEntity("playlist-1", "我的歌单", "我的歌单", createdLocally = true, createdAt = 12L, updatedAt = 12L))
+            database.playlistTrackDao().upsert(playlistTrack)
+
+            relativePath = "vol1/1000/music/G.E.M.邓紫棋-画.flac"
+            val summary = repository.rescanSource(sourceId).getOrThrow()
+
+            val updated = database.trackDao().getBySourceId(sourceId).single()
+            assertEquals(1, summary?.importedTrackCount)
+            assertEquals(relativePath, updated.relativePath)
+            assertEquals(original.id, updated.id)
+            assertEquals(original.mediaLocator, updated.mediaLocator)
+            assertEquals(10L, updated.addedAt)
+            assertEquals(favorite, database.favoriteTrackDao().getByTrackId(original.id))
+            assertEquals(playlistTrack, database.playlistTrackDao().getByPlaylistId("playlist-1").single())
+        } finally {
+            database.close()
+        }
     }
 
     @Test
@@ -1475,23 +1659,85 @@ class ImportSourceRepositoryTest {
     }
 
     @Test
-    fun `switching an FN Music source to server addresses drops the access code`() = runTest {
-        val database = createImportTestDatabase()
-        val gateway = RecordingImportSourceGateway()
-        val credentials = ImportTestSecureCredentialStore()
-        val repository = RoomImportSourceRepository(database = database, gateway = gateway, secureCredentialStore = credentials)
-        val sourceId = repository.addFnMusicSource(
-            FnMusicSourceDraft("NAS", FnMusicConnectionMode.FN_CONNECT, fnId = "mynas", username = "demo", password = "secret", accessCode = "1234"),
-        ).getOrThrow().sourceId
+    fun `switching FN Music connection modes preserves the access code in both directions`() = runTest {
+        for (mode in FnMusicConnectionMode.entries) {
+            val database = createImportTestDatabase()
+            try {
+                val gateway = RecordingImportSourceGateway()
+                val credentials = ImportTestSecureCredentialStore()
+                val repository = RoomImportSourceRepository(database = database, gateway = gateway, secureCredentialStore = credentials)
+                val initial = FnMusicSourceDraft("NAS", mode, baseUrl = "http://10.0.0.2:5666", fnId = "mynas", username = "demo", password = "secret", accessCode = "1234")
+                val sourceId = repository.addFnMusicSource(initial).getOrThrow().sourceId
+                val nextMode = if (mode == FnMusicConnectionMode.ADDRESS) FnMusicConnectionMode.FN_CONNECT else FnMusicConnectionMode.ADDRESS
 
-        repository.updateFnMusicSource(
-            sourceId = sourceId,
-            draft = FnMusicSourceDraft("NAS", FnMusicConnectionMode.ADDRESS, baseUrl = "http://10.0.0.2:5666", username = "demo", password = ""),
-        ).getOrThrow()
+                repository.updateFnMusicSource(sourceId, initial.copy(connectionMode = nextMode, password = "", accessCode = "")).getOrThrow()
 
-        assertEquals("http://10.0.0.2:5666", database.importSourceDao().getById(sourceId)?.rootReference)
-        assertEquals("", gateway.fnMusicScanDrafts.last().accessCode)
-        assertNull(credentials.get(fnMusicAccessCodeCredentialKey(sourceId)))
+                assertEquals(if (nextMode == FnMusicConnectionMode.ADDRESS) "http://10.0.0.2:5666" else "fnconnect://mynas", database.importSourceDao().getById(sourceId)?.rootReference)
+                assertEquals("1234", gateway.fnMusicScanDrafts.last().accessCode)
+                assertEquals("1234", credentials.get(fnMusicAccessCodeCredentialKey(sourceId)))
+            } finally {
+                database.close()
+            }
+        }
+    }
+
+    @Test
+    fun `FN Music access codes are independent of passwords and only committed after successful validation`() = runTest {
+        for (mode in FnMusicConnectionMode.entries) {
+            val database = createImportTestDatabase()
+            try {
+                var scanFailure: Throwable? = null
+                val gateway = RecordingImportSourceGateway(fnMusicScanReportFactory = {
+                    scanFailure?.let { throw it }
+                    ImportScanReport(tracks = emptyList())
+                })
+                val credentials = ImportTestSecureCredentialStore()
+                val repository = RoomImportSourceRepository(database = database, gateway = gateway, secureCredentialStore = credentials)
+                val original = FnMusicSourceDraft("NAS", mode, baseUrl = "http://nas:5666", fnId = "mynas", username = "alice", password = "secret", accessCode = "saved-code")
+                val sourceId = repository.addFnMusicSource(original).getOrThrow().sourceId
+                val key = fnMusicAccessCodeCredentialKey(sourceId)
+                val changedAccount = original.copy(username = "bob", password = "new-password", accessCode = "")
+
+                repository.testUpdatedFnMusicSource(sourceId, changedAccount, keepExistingCredentialWhenBlankPassword = false).getOrThrow()
+                assertEquals("saved-code", gateway.fnMusicTestDrafts.last().accessCode)
+                repository.updateFnMusicSource(sourceId, changedAccount, keepExistingCredentialWhenBlankPassword = false).getOrThrow()
+                assertEquals("saved-code", gateway.fnMusicScanDrafts.last().accessCode)
+                assertEquals("saved-code", credentials.get(key))
+                assertEquals("new-password", credentials.get("credential-$sourceId"))
+
+                val replacement = changedAccount.copy(password = "", accessCode = "replacement")
+                repository.testUpdatedFnMusicSource(sourceId, replacement).getOrThrow()
+                assertEquals("replacement", gateway.fnMusicTestDrafts.last().accessCode)
+                assertEquals("saved-code", credentials.get(key))
+                repository.updateFnMusicSource(sourceId, replacement).getOrThrow()
+                assertEquals("replacement", credentials.get(key))
+                repository.rescanSource(sourceId).getOrThrow()
+                assertEquals("replacement", gateway.fnMusicScanDrafts.last().accessCode)
+
+                val clearing = replacement.copy(accessCode = "ignored-new-code", clearAccessCode = true)
+                repository.testUpdatedFnMusicSource(sourceId, clearing).getOrThrow()
+                assertEquals("", gateway.fnMusicTestDrafts.last().accessCode)
+                assertEquals("replacement", credentials.get(key))
+                for (failure in listOf(IllegalStateException("scan failed"), kotlinx.coroutines.CancellationException("cancelled"))) {
+                    scanFailure = failure
+                    assertTrue(repository.updateFnMusicSource(sourceId, clearing).isFailure)
+                    assertEquals("replacement", credentials.get(key))
+                }
+                scanFailure = null
+                repository.updateFnMusicSource(sourceId, clearing).getOrThrow()
+                assertEquals("", gateway.fnMusicScanDrafts.last().accessCode)
+                assertNull(credentials.get(key))
+                repository.rescanSource(sourceId).getOrThrow()
+                assertEquals("", gateway.fnMusicScanDrafts.last().accessCode)
+
+                repository.updateFnMusicSource(sourceId, replacement).getOrThrow()
+                repository.deleteSource(sourceId).getOrThrow()
+                assertNull(credentials.get(key))
+                assertNull(credentials.get("credential-$sourceId"))
+            } finally {
+                database.close()
+            }
+        }
     }
 
     @Test
@@ -2115,6 +2361,7 @@ private class RecordingImportSourceGateway(
     private val embyScanReportFactory: ((String) -> ImportScanReport)? = null,
     private val fnMusicScanReportFactory: ((String) -> ImportScanReport)? = null,
 ) : ImportSourceGateway {
+    val remoteAddressCalls = mutableListOf<Pair<ImportSourceType, String>>()
     val fnMusicTestDrafts = mutableListOf<FnMusicSourceDraft>()
     val fnMusicScanDrafts = mutableListOf<FnMusicSourceDraft>()
     var localFolderScanCount: Int = 0
@@ -2172,6 +2419,7 @@ private class RecordingImportSourceGateway(
     }
 
     override suspend fun testNavidrome(draft: NavidromeSourceDraft) {
+        remoteAddressCalls += ImportSourceType.NAVIDROME to draft.baseUrl
         navidromeTestCount += 1
     }
 
@@ -2182,6 +2430,7 @@ private class RecordingImportSourceGateway(
     }
 
     override suspend fun scanNavidrome(draft: NavidromeSourceDraft, sourceId: String): ImportScanReport {
+        remoteAddressCalls += ImportSourceType.NAVIDROME to draft.baseUrl
         navidromeScanCount += 1
         lastNavidromeScanDraft = draft
         return scanReport
@@ -2210,6 +2459,7 @@ private class RecordingImportSourceGateway(
         progressSink: ImportScanProgressSink,
         trackBatchSink: ImportTrackBatchSink,
     ): ImportStreamingScanReport {
+        remoteAddressCalls += ImportSourceType.NAVIDROME to draft.baseUrl
         navidromeStreamingScanCount += 1
         lastNavidromeScanDraft = draft
         navidromeStreamingHandler?.let { handler ->
@@ -2240,16 +2490,19 @@ private class RecordingImportSourceGateway(
     }
 
     override suspend fun testSubsonic(draft: SubsonicSourceDraft) {
+        remoteAddressCalls += ImportSourceType.SUBSONIC to draft.baseUrl
         subsonicTestCount += 1
     }
 
     override suspend fun scanSubsonic(draft: SubsonicSourceDraft, sourceId: String): ImportScanReport {
+        remoteAddressCalls += ImportSourceType.SUBSONIC to draft.baseUrl
         subsonicScanCount += 1
         lastSubsonicScanDraft = draft
         return scanReport
     }
 
     override suspend fun testEmby(draft: EmbySourceDraft, deviceId: String): EmbyCredential {
+        remoteAddressCalls += ImportSourceType.EMBY to draft.baseUrl
         embyTestCount += 1
         lastEmbyTestDraft = draft
         lastEmbyTestDeviceId = deviceId
@@ -2261,6 +2514,7 @@ private class RecordingImportSourceGateway(
         credential: EmbyCredential,
         deviceId: String,
     ) {
+        remoteAddressCalls += ImportSourceType.EMBY to draft.baseUrl
         embyCredentialTestCount += 1
         lastEmbyCredentialTestDraft = draft
         lastEmbyCredentialTestCredential = credential
@@ -2273,6 +2527,7 @@ private class RecordingImportSourceGateway(
         sourceId: String,
         deviceId: String,
     ): ImportScanReport {
+        remoteAddressCalls += ImportSourceType.EMBY to draft.baseUrl
         embyScanCount += 1
         lastEmbyScanDraft = draft
         lastEmbyScanCredential = credential
@@ -2281,10 +2536,12 @@ private class RecordingImportSourceGateway(
     }
 
     override suspend fun testFnMusic(draft: FnMusicSourceDraft, deviceId: String) {
+        remoteAddressCalls += ImportSourceType.FN_MUSIC to draft.baseUrl.ifBlank { draft.wanBaseUrl }
         fnMusicTestDrafts += draft
     }
 
     override suspend fun scanFnMusic(draft: FnMusicSourceDraft, sourceId: String, deviceId: String): ImportScanReport {
+        remoteAddressCalls += ImportSourceType.FN_MUSIC to draft.baseUrl.ifBlank { draft.wanBaseUrl }
         fnMusicScanDrafts += draft
         return fnMusicScanReportFactory?.invoke(sourceId) ?: scanReport
     }

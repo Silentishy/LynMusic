@@ -820,10 +820,10 @@ class PlaylistsRepositoryTest {
 
         assertEquals(listOf("Artist Covered Album", "Artist Plain Album"), albums.map { it.album.title })
         assertEquals(
-            buildNavidromeCoverLocator("nav-online-artist-detail", "cover-artist-album"),
+            buildNavidromeCoverLocator("nav-online-artist-detail", "album-artist-covered"),
             albums.first().artworkLocator,
         )
-        assertNull(albums[1].artworkLocator)
+        assertEquals(buildNavidromeCoverLocator("nav-online-artist-detail", "album-artist-plain"), albums[1].artworkLocator)
     }
 
     @Test
@@ -1475,6 +1475,7 @@ class PlaylistsRepositoryTest {
         val httpClient = object : LyricsHttpClient {
             override suspend fun request(request: LyricsRequest): Result<LyricsHttpResponse> = runCatching {
                 val data = when {
+                    request.url.endsWith("/access_code_verify") || request.url.endsWith("/sys/config") -> "{}"
                     request.url.contains("password-login") -> """{"userToken":"tok"}"""
                     request.url.contains("/playlist/list") -> """{"list":[{"guid":"p1","name":"Mix","trackCount":3}],"total":1}"""
                     request.url.contains("/track/playlist-detail/list") ->
@@ -1801,7 +1802,7 @@ class PlaylistImportRepositoryUiTextTest {
             val issue = report.failedLines.single()
             assertEquals(2, issue.lineNumber)
             assertEquals("失败歌曲 - 歌手", issue.rawText)
-            assertEquals("Navidrome updatePlaylist 失败，HTTP 403", issue.message)
+            assertEquals("Navidrome updatePlaylist 失败，HTTP 403", resolveUiText(issue.messageUiText(), AppLanguage.SimplifiedChinese))
             assertEquals("Navidrome updatePlaylist failed, HTTP 403", resolveUiText(issue.messageUiText(), AppLanguage.English))
             assertEquals("Navidrome updatePlaylist 失敗，HTTP 403", resolveUiText(issue.messageUiText(), AppLanguage.TraditionalChinese))
             assertEquals(listOf(listOf("song-good", "song-bad"), listOf("song-bad")), failedBatches)
@@ -2426,13 +2427,11 @@ private class RecordingOnlineArtistsHttpClient(
                     body = getArtistsBody(artists),
                 )
 
-                "getArtist" -> LyricsHttpResponse(
-                    statusCode = 200,
-                    body = getArtistBody(
-                        artistId = url.parameters["id"].orEmpty(),
-                        albums = albumsByArtistId[url.parameters["id"].orEmpty()].orEmpty(),
-                    ),
-                )
+                "login" -> LyricsHttpResponse(200, """{"token":"artist-token"}""")
+                "album" -> LyricsHttpResponse(200, albumsByArtistId[url.parameters["artist_id"]].orEmpty()
+                    .joinToString(",", "[", "]") { album ->
+                        """{"id":"${album.id}","name":"${album.name}","albumArtist":"${album.artist}","songCount":1}"""
+                    })
 
                 else -> error("Unexpected online artists request endpoint: $endpoint")
             },
@@ -2459,25 +2458,6 @@ private class RecordingOnlineArtistsHttpClient(
         """.trimIndent()
     }
 
-    private fun getArtistBody(
-        artistId: String,
-        albums: List<OnlineSearchAlbumState>,
-    ): String {
-        val albumItems = albums.joinToString(",") { album -> albumJson(album) }
-        return """
-            {
-              "subsonic-response": {
-                "status": "ok",
-                "version": "1.16.1",
-                "artist": {
-                  "id": "$artistId",
-                  "name": "Artist $artistId",
-                  "album": [$albumItems]
-                }
-              }
-            }
-        """.trimIndent()
-    }
 }
 
 private data class RecordedSearch3Request(

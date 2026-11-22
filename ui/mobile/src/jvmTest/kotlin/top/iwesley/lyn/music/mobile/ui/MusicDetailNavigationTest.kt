@@ -1,0 +1,157 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+package top.iwesley.lyn.music.mobile.ui
+
+import androidx.compose.runtime.mutableStateOf
+import androidx.navigation3.runtime.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.test.*
+import kotlinx.serialization.json.Json
+import kotlin.test.*
+import top.iwesley.lyn.music.feature.details.*
+import top.iwesley.lyn.music.feature.library.LibrarySourceFilter
+
+class MusicDetailNavigationTest {
+    @Test fun tagRoutePushAndPopRetainOriginEntryAndItsPosition() = runTest {
+        val owner = owner()
+        owner.open(LibraryNavigationTarget.Album("album"))
+        val origin = owner.top
+        val entry = owner.entry(origin)
+        entry.contentListState = androidx.compose.foundation.lazy.LazyListState(23, 11)
+        owner.openMusicTags("track", "local")
+        val tags = owner.top
+        assertEquals("tags", tags.kind)
+        assertEquals("track", tags.entityId)
+        assertEquals("local", tags.sourceId)
+        assertEquals(3, owner.backStack.size)
+        assertEquals(tags, Json.decodeFromString<MusicDetailRoute>(Json.encodeToString(tags)))
+        owner.openMusicTags("track", "local")
+        assertEquals(tags, owner.top)
+        owner.pop()
+        assertEquals(origin, owner.top)
+        assertSame(entry, owner.entry(origin))
+        assertEquals(23, entry.contentListState.firstVisibleItemIndex)
+        assertEquals(11, entry.contentListState.firstVisibleItemScrollOffset)
+        owner.clear()
+    }
+
+    @Test fun tagBackRequestsWaitForTheForegroundEditorAndRejectStaleCallbacks() = runTest {
+        val owner = owner()
+        owner.openMusicTags("track", "local")
+        val tags = owner.top
+        val generation = owner.generation
+        owner.requestBack() // A composing editor must not be popped without confirmation.
+        assertEquals(tags, owner.top)
+        var requests = 0
+        owner.setBackHandler(tags.entryId) { requests++ }
+        owner.requestBack()
+        assertEquals(1, requests)
+        assertEquals(tags, owner.top)
+        owner.pop(tags.entryId, generation)
+        owner.openMusicTags("track", "other-source")
+        owner.requestBack(tags.entryId, generation)
+        assertEquals(1, requests)
+        assertEquals("other-source", owner.top.sourceId)
+        owner.clear()
+    }
+
+    @Test fun stackDeduplicatesOnlyTheSameTopAndSource()=runTest {
+        val owner=owner()
+        owner.open(LibraryNavigationTarget.OnlineAlbum("one","album"))
+        val first=owner.top
+        owner.open(LibraryNavigationTarget.OnlineAlbum("one","album",albumTitle="New seed"))
+        assertEquals(2,owner.backStack.size)
+        owner.open(LibraryNavigationTarget.OnlineAlbum("two","album"))
+        assertEquals(3,owner.backStack.size)
+        owner.open(LibraryNavigationTarget.OnlineAlbum("one","album"))
+        assertNotEquals(first.entryId,owner.top.entryId)
+        owner.pop(); assertEquals("two",owner.top.sourceId)
+        owner.pop();assertEquals(first,owner.top)
+        owner.pop();assertFalse(owner.hasDetails)
+    }
+    @Test fun localFilterIsPartOfDestinationIdentity()=runTest {
+        val owner=owner()
+        owner.open(LibraryNavigationTarget.Artist("artist",LibrarySourceFilter.Source("one")))
+        owner.open(LibraryNavigationTarget.Artist("artist",LibrarySourceFilter.Source("two")))
+        assertEquals(3,owner.backStack.size)
+        assertEquals(LibrarySourceFilter.Source("two"),owner.top.librarySourceFilter)
+    }
+    @Test fun routesSerializeOnlyIdentifiersContextAndSeeds() {
+        val route=LibraryNavigationTarget.OnlineAlbum("source","album","Title","Various artists","cover").detailRoute().copy(entryId="entry")
+        assertEquals(route,Json.decodeFromString<MusicDetailRoute>(Json.encodeToString(route)))
+        val local=LibraryNavigationTarget.Album("album",LibrarySourceFilter.DOWNLOADED).detailRoute()
+        assertEquals(LibrarySourceFilter.DOWNLOADED,Json.decodeFromString<MusicDetailRoute>(Json.encodeToString(local)).librarySourceFilter)
+    }
+    @Test fun clearInvalidatesOldCallbacksAndDoesNotRestorePlayer()=runTest {
+        var restores=0
+        val owner=owner(restore={restores++})
+        owner.open(LibraryNavigationTarget.Album("a"),fromPlayer=true)
+        val old=owner.top;val generation=owner.generation
+        owner.clear();assertTrue(owner.immediate)
+        owner.open(LibraryNavigationTarget.Album("b"))
+        owner.pop(old.entryId,generation)
+        assertEquals("b",owner.top.entityId);assertFalse(owner.immediate)
+        owner.pop();assertEquals(0,restores)
+    }
+    @Test fun finalNormalPopRestoresPlayerOnce()=runTest {
+        var restores=0;val owner=owner(restore={restores++})
+        owner.open(LibraryNavigationTarget.Album("a"),true)
+        owner.open(LibraryNavigationTarget.Artist("b"))
+        owner.pop();assertEquals(0,restores)
+        owner.pop();owner.pop();assertEquals(1,restores)
+    }
+    @Test fun coveredEntryRetainsLoadedDataUntilReleased()=runTest {
+        val owner=owner()
+        owner.open(LibraryNavigationTarget.Album("a"));val a=owner.top
+        val state=owner.entry(a);runCurrent();assertEquals("a",state.data?.title)
+        owner.open(LibraryNavigationTarget.Artist("b"));owner.pop()
+        assertSame(state,owner.entry(a))
+        owner.pop();owner.release(a.entryId)
+    }
+    @Test fun poppedEntryIgnoresNonCancellableLateResponse()=runTest {
+        val gate=CompletableDeferred<Unit>()
+        val queries=TestMusicDetailQueries(album = { flow { withContext(NonCancellable) { gate.await() }; emit(AlbumDetailData("late")) } })
+        val owner=owner(queries)
+        owner.open(LibraryNavigationTarget.Album("a"));val state=owner.entry(owner.top);runCurrent()
+        owner.pop();gate.complete(Unit);runCurrent()
+        assertNull(state.data)
+    }
+    @Test fun retryOnlyUpdatesItsOwnEntryAndAcceptsSuccessfulEmptyData()=runTest {
+        var calls=0
+        val owner=owner(TestMusicDetailQueries(album = { request -> flow {
+            if(request.albumId=="a" && ++calls==1) error("failure")
+            emit(AlbumDetailData(request.albumId))
+        } }))
+        owner.open(LibraryNavigationTarget.Album("a"));val a=owner.entry(owner.top);runCurrent()
+        assertNotNull(a.error)
+        owner.open(LibraryNavigationTarget.Album("b"));val b=owner.entry(owner.top);runCurrent()
+        a.retry();runCurrent()
+        assertEquals("a",a.data?.title);assertNull(a.error);assertEquals("b",b.data?.title)
+        assertTrue(a.data!!.tracks.isEmpty())
+        owner.clear()
+    }
+    @Test fun anOutgoingSceneCannotStartANewQueryAfterItsRouteWasRemoved() = runTest {
+        var requests = 0
+        val owner = owner(TestMusicDetailQueries(album = { flow { requests++; emit(AlbumDetailData("late")) } }))
+        owner.open(LibraryNavigationTarget.Album("a"))
+        val route = owner.top
+        owner.pop()
+        val state = owner.entry(route)
+        runCurrent()
+        assertEquals(0, requests)
+        assertNull(state.data)
+        owner.release(route.entryId)
+    }
+    @Test fun unavailableSourceIsExposedWithoutChangingTarget()=runTest {
+        val owner=owner(TestMusicDetailQueries(artistAlbums = { flow { throw MusicDetailUnavailableException() } }, artistTracks = { flow { throw MusicDetailUnavailableException() } }))
+        owner.open(LibraryNavigationTarget.OnlineArtist("missing","artist"))
+        val state=owner.entry(owner.top);runCurrent()
+        assertIs<MusicDetailUnavailableException>(state.artistAlbums.error)
+        assertEquals("missing",owner.top.sourceId)
+        owner.clear()
+    }
+    private fun CoroutineScope.owner(
+        queries:MusicDetailQueries=TestMusicDetailQueries(),
+        restore:()->Unit={},
+    )=MusicDetailNavigation(NavBackStack<NavKey>(MusicDetailRoute()),queries,this,mutableStateOf(false),restore)
+}

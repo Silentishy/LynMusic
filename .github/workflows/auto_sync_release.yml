@@ -84,7 +84,7 @@ jobs:
           java-version: '21.0.9'
           distribution: 'oracle'
 
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v6
 
       - name: Prepare Embedded LibVLC (macOS)
         run: ./scripts/prepare_embedded_vlc_macos.sh
@@ -141,18 +141,22 @@ jobs:
           echo "Files to upload:"
           ls -lh release-dmgs/
 
+          cat > RELEASE_NOTES.md <<EOF
+          ### LynMusic ${UPSTREAM_TAG} for macOS (Standalone with Embedded LibVLC)
+
+          本版本基于上游 [wesley666/LynMusic](https://github.com/wesley666/LynMusic) 的 ${UPSTREAM_TAG} 自动同步并构建，**免安装 VLC**。
+
+          #### ✨ 特性
+          - **内置 LibVLC 运行时与全套解码器/插件**：解压即用，无需在系统中单独安装 VLC.app。
+          - **全格式支持**：支持 FLAC、AAC、MP3、OGG、OPUS、ALAC 等全部主流音频格式及网络流。
+          - **双架构支持**：提供 Apple Silicon (\`arm64\`) 与 Intel (\`x64\`) 两种独立 DMG 安装包。
+
+          #### 📥 下载安装
+          - **Apple Silicon (M1/M2/M3/M4 系列芯片)**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-arm64.dmg\`
+          - **Intel 芯片**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-x64.dmg\`
+          EOF
+
           gh release create "$RELEASE_TAG" release-dmgs/*.dmg \
             --repo "${{ github.repository }}" \
             --title "LynMusic ${UPSTREAM_TAG} (Standalone macOS with Embedded LibVLC)" \
-            --notes "### LynMusic ${UPSTREAM_TAG} for macOS (Standalone with Embedded LibVLC)
-
-本版本基于上游 [wesley666/LynMusic](https://github.com/wesley666/LynMusic) 的 ${UPSTREAM_TAG} 自动同步并构建，**免安装 VLC**。
-
-#### ✨ 特性
-- **内置 LibVLC 运行时与全套解码器/插件**：解压即用，无需在系统中单独安装 VLC.app。
-- **全格式支持**：支持 FLAC、AAC、MP3、OGG、OPUS、ALAC 等全部主流音频格式及网络流。
-- **双架构支持**：提供 Apple Silicon (\`arm64\`) 与 Intel (\`x64\`) 两种独立 DMG 安装包。
-
-#### 📥 下载安装
-- **Apple Silicon (M1/M2/M3/M4 系列芯片)**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-arm64.dmg\`
-- **Intel 芯片**: 请下载 \`LynMusic-${UPSTREAM_TAG}-standalone-x64.dmg\`"
+            --notes-file RELEASE_NOTES.md

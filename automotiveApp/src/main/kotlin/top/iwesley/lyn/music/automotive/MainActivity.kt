@@ -30,16 +30,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import top.iwesley.lyn.music.ANDROID_AUTOMOTIVE_PLATFORM_NAME
 import kotlin.math.min
-import top.iwesley.lyn.music.App
+import top.iwesley.lyn.music.automotive.ui.AutomotiveApp
 import top.iwesley.lyn.music.LynMusicAppComponent
 import top.iwesley.lyn.music.StartupAutoOpenGate
-import top.iwesley.lyn.music.StartupDatabaseErrorScreen
+import top.iwesley.lyn.music.automotive.ui.StartupDatabaseErrorScreen
 import top.iwesley.lyn.music.buildPlayerAppComponent
 import top.iwesley.lyn.music.core.model.AppDisplayScalePreset
-import top.iwesley.lyn.music.core.model.effectiveAppDisplayDensity
 import top.iwesley.lyn.music.feature.player.PlayerIntent
 import top.iwesley.lyn.music.feature.settings.SettingsIntent
 import top.iwesley.lyn.music.platform.AndroidExternalAudioOpenSupport
+import top.iwesley.lyn.music.platform.androidAppDisplayDensity
 import top.iwesley.lyn.music.platform.createAndroidRuntimeGraph
 import kotlin.math.roundToInt
 
@@ -78,7 +78,7 @@ class MainActivity : ComponentActivity() {
                 if (appComponent != null) {
                     val appDisplayScalePreset by appComponent.appDisplayScalePreset.collectAsState()
                     ProvideFixedAndroidComposeDensity(appDisplayScalePreset = appDisplayScalePreset) {
-                        App(
+                        AutomotiveApp(
                             component = appComponent,
                             startupAutoOpenGate = startupAutoOpenViewModel.gate,
                         )
@@ -150,7 +150,7 @@ private fun ProvideFixedAndroidComposeDensity(
     val currentDensity = LocalDensity.current
     val fixedDensity = remember(currentDensity.density, currentDensity.fontScale, appDisplayScalePreset) {
         Density(
-            density = effectiveAppDisplayDensity(androidStableDensityScale(currentDensity.density), appDisplayScalePreset),
+            density = androidAppDisplayDensity(currentDensity.density, appDisplayScalePreset),
             fontScale = currentDensity.fontScale,
         )
     }

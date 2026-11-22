@@ -45,6 +45,8 @@ import top.iwesley.lyn.music.core.model.EqualizerPlatformService
 import top.iwesley.lyn.music.core.model.ImportSourceIndexMode
 import top.iwesley.lyn.music.core.model.LyricsShareFontLibraryPlatformService
 import top.iwesley.lyn.music.core.model.LyricsSharePlatformService
+import top.iwesley.lyn.music.core.model.PlayerLyricsStylePreferencesStore
+import top.iwesley.lyn.music.core.model.InMemoryPlayerLyricsStylePreferencesStore
 import top.iwesley.lyn.music.core.model.LyricsShareFontPreferencesStore
 import top.iwesley.lyn.music.core.model.MenuBarLyricsControlsPlatformService
 import top.iwesley.lyn.music.core.model.NoopDiagnosticLogger
@@ -116,6 +118,8 @@ class DefaultPlaybackRepository(
     hydrateImmediately: Boolean = true,
     private val playbackStatsReporter: PlaybackStatsReporter = NoopPlaybackStatsReporter,
     private val currentTimeMillis: () -> Long = ::now,
+    /** Native asynchronous players retain the requested position; offset streams can report an accepted position. */
+    private val seekPositionAfterCommand: (Long) -> Long = { it },
 ) : PlaybackRepository {
     private val initialPlaybackVolume = normalizePlaybackVolume(playbackPreferencesStore.playbackVolume.value)
     private val mutableSnapshot = MutableStateFlow(
@@ -494,7 +498,8 @@ class DefaultPlaybackRepository(
         playbackCommandMutex.withLock {
             if (!mutableSnapshot.value.canSeek) return@withLock
             gateway.seekTo(positionMs)
-            mutableSnapshot.update { it.copy(positionMs = positionMs.coerceAtLeast(0L)) }
+            val acceptedPositionMs = seekPositionAfterCommand(positionMs).coerceAtLeast(0L)
+            mutableSnapshot.update { it.copy(positionMs = acceptedPositionMs) }
             persistSnapshotCursorIfPersistent()
         }
     }
@@ -1154,6 +1159,7 @@ data class PlayerRuntimeServices(
     val lyricsShareFontLibraryPlatformService: LyricsShareFontLibraryPlatformService =
         UnsupportedLyricsShareFontLibraryPlatformService,
     val lyricsShareFontPreferencesStore: LyricsShareFontPreferencesStore = UnsupportedLyricsShareFontPreferencesStore,
+    val playerLyricsStylePreferencesStore: PlayerLyricsStylePreferencesStore = InMemoryPlayerLyricsStylePreferencesStore(),
     val systemPlaybackControlsPlatformService: SystemPlaybackControlsPlatformService = UnsupportedSystemPlaybackControlsPlatformService,
     val menuBarLyricsControlsPlatformService: MenuBarLyricsControlsPlatformService =
         UnsupportedMenuBarLyricsControlsPlatformService,

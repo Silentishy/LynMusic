@@ -26,7 +26,7 @@ jobs:
           java-version: '21.0.9'
           distribution: 'oracle'
 
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v6
 
       - name: Prepare Embedded LibVLC (macOS)
         run: ./scripts/prepare_embedded_vlc_macos.sh

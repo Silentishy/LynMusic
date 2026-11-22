@@ -1,5 +1,7 @@
 package top.iwesley.lyn.music.tv
 
+import kotlinx.coroutines.launch
+
 import top.iwesley.lyn.music.core.model.ProvideUiLanguage
 
 import top.iwesley.lyn.music.resources.*
@@ -10,9 +12,7 @@ import top.iwesley.lyn.music.displayText
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.os.Build
 import android.os.Bundle
-import android.util.DisplayMetrics
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -73,12 +73,10 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.OutlinedButton as TvOutlinedButton
 import coil3.compose.rememberAsyncImagePainter
-import kotlin.math.roundToInt
 import top.iwesley.lyn.music.LynMusicAppComponent
 import top.iwesley.lyn.music.core.model.AppDisplayScalePreset
 import top.iwesley.lyn.music.core.model.ArtworkCacheStore
 import top.iwesley.lyn.music.core.model.Track
-import top.iwesley.lyn.music.core.model.effectiveAppDisplayDensity
 import top.iwesley.lyn.music.core.model.normalizedArtworkCacheLocator
 import top.iwesley.lyn.music.core.model.resolveArtworkCacheTarget
 import top.iwesley.lyn.music.core.model.trackArtworkCacheKey
@@ -86,6 +84,7 @@ import top.iwesley.lyn.music.feature.favorites.FavoritesIntent
 import top.iwesley.lyn.music.feature.player.PlayerIntent
 import top.iwesley.lyn.music.feature.library.libraryAlbumId
 import top.iwesley.lyn.music.feature.library.libraryArtistId
+import top.iwesley.lyn.music.platform.androidAppDisplayDensity
 import top.iwesley.lyn.music.tv.ui.TvMainTheme
 import top.iwesley.lyn.music.tv.ui.TvMediaBrowserMode
 
@@ -173,7 +172,7 @@ private fun TvMediaDetailApp(
     val favoritesState by component.favoritesStore.state.collectAsState()
 
     LaunchedEffect(component, args.source) {
-        component.playerStore.startHydration()
+        launch { component.playerStore.restorePlayback() }
         component.favoritesStore.ensureContentStarted()
         when (args.source) {
             TvMediaDetailSource.Library -> component.libraryStore.ensureStarted()
@@ -532,10 +531,7 @@ private fun ProvideTvMediaDetailDensity(
     val currentDensity = LocalDensity.current
     val fixedDensity = remember(currentDensity.density, currentDensity.fontScale, appDisplayScalePreset) {
         Density(
-            density = effectiveAppDisplayDensity(
-                tvMediaDetailStableDensityScale(currentDensity.density),
-                appDisplayScalePreset,
-            ),
+            density = androidAppDisplayDensity(currentDensity.density, appDisplayScalePreset),
             fontScale = currentDensity.fontScale,
         )
     }
@@ -578,16 +574,6 @@ private fun formatTvMediaDetailDuration(durationMs: Long): String {
     } else {
         "%d:%02d".format(minutes, seconds)
     }
-}
-
-private fun tvMediaDetailStableDensityScale(fallbackDensity: Float): Float {
-    val fallbackDpi = (fallbackDensity.takeIf { it > 0f } ?: 1f) * DisplayMetrics.DENSITY_DEFAULT
-    val stableDpi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-        DisplayMetrics.DENSITY_DEVICE_STABLE
-    } else {
-        fallbackDpi.roundToInt()
-    }.takeIf { it > 0 } ?: fallbackDpi.roundToInt()
-    return stableDpi / DisplayMetrics.DENSITY_DEFAULT.toFloat()
 }
 
 private val TvDetailPanelShape = RoundedCornerShape(18.dp)

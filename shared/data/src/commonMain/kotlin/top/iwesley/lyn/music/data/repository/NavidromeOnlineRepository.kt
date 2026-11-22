@@ -33,9 +33,13 @@ import top.iwesley.lyn.music.data.db.LynMusicDatabase
 import top.iwesley.lyn.music.domain.NavidromeResolvedSource
 import top.iwesley.lyn.music.domain.RemoteSourceAddressSelector
 import top.iwesley.lyn.music.domain.isSubsonicCompatibleSourceType
+import top.iwesley.lyn.music.domain.normalizeNavidromeBaseUrl
+import top.iwesley.lyn.music.domain.normalizeRemoteSourceBaseUrls
 import top.iwesley.lyn.music.domain.normalizeSubsonicBaseUrl
 import top.iwesley.lyn.music.domain.requestNavidromeJson
 import top.iwesley.lyn.music.domain.requestNavidromeJsonWithRepeatedParameters
+import top.iwesley.lyn.music.domain.requestNavidromeArtistSongs
+import top.iwesley.lyn.music.domain.requestNavidromeArtistAlbums
 import top.iwesley.lyn.music.domain.requestNavidromeSongPage
 import top.iwesley.lyn.music.domain.toSubsonicAuthMode
 
@@ -81,6 +85,7 @@ interface NavidromeOnlineDataSource {
     suspend fun searchTracks(sourceId: String, query: String, offset: Int, limit: Int): OnlinePage<Track>
     suspend fun searchAlbums(sourceId: String, query: String, offset: Int, limit: Int): OnlinePage<OnlineAlbumItem>
     suspend fun searchArtists(sourceId: String, query: String, offset: Int, limit: Int): OnlinePage<OnlineArtistItem>
+    suspend fun artistTracks(sourceId: String, artistId: String): List<Track>
     suspend fun artistAlbums(sourceId: String, artistId: String): List<OnlineAlbumItem>
     suspend fun albumTracks(sourceId: String, albumId: String): List<Track>
     suspend fun favoriteTracks(sourceId: String, offset: Int, limit: Int, query: String): OnlinePage<Track>
@@ -314,21 +319,23 @@ class NavidromeOnlineRepository(
         )
     }
 
+    override suspend fun artistTracks(sourceId: String, artistId: String): List<Track> {
+        val source = requireOnlineNavidromeSource(sourceId)
+        return requestNavidromeArtistSongs(httpClient, source, artistId, logger, IMPORT_SOURCE_REQUEST_TIMEOUT_MILLIS)
+            .map { it.toOnlineTrack(source) }
+    }
+
     override suspend fun artistAlbums(sourceId: String, artistId: String): List<OnlineAlbumItem> {
         val source = requireOnlineNavidromeSource(sourceId)
-        val payload = requestNavidromeJson(
-            httpClient = httpClient,
-            source = source,
-            endpoint = "getArtist",
-            parameters = mapOf("id" to artistId),
-            logger = logger,
-            logContext = "artistId=$artistId",
-            timeoutMillis = IMPORT_SOURCE_REQUEST_TIMEOUT_MILLIS,
-        )
-        return payload["artist"].asObjectOrNull()
-            ?.get("album")
-            .asObjectList()
-            .mapNotNull { it.toOnlineAlbum(source) }
+        return requestNavidromeArtistAlbums(httpClient, source, artistId, logger, IMPORT_SOURCE_REQUEST_TIMEOUT_MILLIS)
+            .mapNotNull { album ->
+                val id = album.string("id") ?: return@mapNotNull null
+                OnlineAlbumItem(
+                    album = Album(id, album.string("name") ?: "未知专辑", album.string("albumArtist"),
+                        album.int("songCount") ?: 0),
+                    artworkLocator = buildSubsonicCompatibleCoverLocator(source.sourceType, sourceId, id),
+                )
+            }.sortedWith(compareBy({ it.album.title.lowercase() }, { it.album.id }))
     }
 
     private suspend fun requestSearch3Result(
@@ -790,10 +797,15 @@ class NavidromeOnlineRepository(
         val credential = credentialKey?.let { secureCredentialStore.get(it) }.orEmpty()
         if (authMode == SubsonicAuthMode.PASSWORD && (username.isBlank() || credential.isBlank())) return null
         if (authMode == SubsonicAuthMode.API_KEY && credential.isBlank()) return null
-        val serverLabel = if (sourceType == ImportSourceType.NAVIDROME) "Navidrome" else "Subsonic"
+        val (lanBaseUrl, wanBaseUrl) = normalizeRemoteSourceBaseUrls(
+            sourceType = sourceType,
+            lanBaseUrl = rootReference,
+            wanBaseUrl = wanRootReference,
+            normalizeBaseUrl = if (sourceType == ImportSourceType.NAVIDROME) ::normalizeNavidromeBaseUrl else ::normalizeSubsonicBaseUrl,
+        )
         return NavidromeResolvedSource(
-            baseUrl = normalizeSubsonicBaseUrl(rootReference).takeIf { it.isNotBlank() } ?: rootReference,
-            wanBaseUrl = wanRootReference?.let { normalizeSubsonicBaseUrl(it) },
+            baseUrl = lanBaseUrl,
+            wanBaseUrl = wanBaseUrl,
             sourceId = id,
             addressSelector = addressSelector,
             username = username,

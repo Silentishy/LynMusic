@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
-    alias(libs.plugins.androidLibrary)
+    alias(libs.plugins.androidKmpLibrary)
     alias(libs.plugins.androidx.room)
     alias(libs.plugins.ksp)
 }
@@ -12,15 +12,19 @@ plugins {
 kotlin {
     jvmToolchain(21)
 
-    androidTarget {
+    android {
+        namespace = "top.iwesley.lyn.music.shared.data"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        androidResources.enable = true
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_21)
         }
+        withHostTest {
+            isIncludeAndroidResources = true
+            targetSdk { version = release(libs.versions.android.minSdk.get().toInt()) }
+        }
     }
-
-    iosArm64()
-    iosSimulatorArm64()
-    macosArm64()
 
     jvm {
         compilerOptions {
@@ -29,6 +33,17 @@ kotlin {
     }
 
     sourceSets {
+        // These shared fixtures are compiled only into test source sets.
+        listOf("commonTest", "jvmTest", "androidHostTest").forEach { sourceSetName ->
+            named(sourceSetName) {
+                kotlin.srcDir(rootProject.file("tools/test-fixtures/src/$sourceSetName/kotlin"))
+            }
+        }
+        named("androidHostTest") {
+            dependencies {
+                implementation(libs.robolectric)
+            }
+        }
         commonMain.dependencies {
             implementation(project(":shared:resources"))
             implementation(project(":shared:core"))
@@ -36,6 +51,7 @@ kotlin {
             implementation(libs.androidx.sqlite.bundled)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            implementation(libs.xmlutil.core)
             implementation(libs.ktor.client.core)
         }
         commonTest.dependencies {
@@ -56,26 +72,9 @@ kotlin {
     }
 }
 
-android {
-    namespace = "top.iwesley.lyn.music.shared.data"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    defaultConfig {
-        minSdk = libs.versions.android.minSdk.get().toInt()
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
-    }
-}
-
 dependencies {
     add("kspAndroid", libs.androidx.room.compiler)
     add("kspJvm", libs.androidx.room.compiler)
-    add("kspIosArm64", libs.androidx.room.compiler)
-    add("kspIosSimulatorArm64", libs.androidx.room.compiler)
-    add("kspMacosArm64", libs.androidx.room.compiler)
 }
 
 room {

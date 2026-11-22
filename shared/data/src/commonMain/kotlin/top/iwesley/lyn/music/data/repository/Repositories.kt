@@ -19,12 +19,18 @@ import androidx.room.immediateTransaction
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteStatement
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.emptyFlow
+import top.iwesley.lyn.music.domain.lyricsVersion
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlin.random.Random
 import kotlin.time.Clock
 import top.iwesley.lyn.music.core.model.Album
@@ -176,6 +182,8 @@ import top.iwesley.lyn.music.domain.testEachRemoteSourceAddress
 import top.iwesley.lyn.music.domain.requestNavidromeLyrics
 import top.iwesley.lyn.music.domain.requestEmbyLyricsDocument as requestEmbyServerLyricsDocument
 import top.iwesley.lyn.music.domain.RemoteSourceAddressSelector
+import top.iwesley.lyn.music.domain.RemoteSourceAddressKind
+import top.iwesley.lyn.music.domain.RemoteSourceBaseUrl
 import top.iwesley.lyn.music.domain.resolveEmbyDeviceId
 import top.iwesley.lyn.music.domain.resolveNavidromeCoverArtUrl
 import top.iwesley.lyn.music.domain.resolveNavidromeStreamUrl
@@ -537,6 +545,15 @@ internal fun playlistImportFailure(
 )
 
 interface LyricsRepository {
+    val changes: Flow<LyricsChange> get() = emptyFlow()
+    suspend fun loadPlaybackLyrics(track: Track): LyricsLoadResult = try {
+        getLyrics(track)?.let(LyricsLoadResult::Found) ?: LyricsLoadResult.Unavailable()
+    } catch (error: Throwable) {
+        if (error is CancellationException) throw error
+        LyricsLoadResult.Unavailable(error)
+    }
+    suspend fun readOffset(track: Track, version: String): Long? = 0L
+    suspend fun saveOffset(track: Track, version: String, offsetMs: Long): Boolean = false
     suspend fun getLyrics(track: Track): ResolvedLyricsResult?
     suspend fun resolveNetworkLyrics(metadata: LyricsLookupMetadata): ResolvedLyricsResult? = null
     suspend fun searchLyricsCandidates(track: Track, includeTrackProvidedCandidate: Boolean = true): List<LyricsSearchCandidate>
@@ -557,11 +574,13 @@ interface LyricsRepository {
 data class ResolvedLyricsResult(
     val document: LyricsDocument,
     val artworkLocator: String? = null,
+    val version: String = lyricsVersion(document),
 )
 
 data class AppliedLyricsResult(
     val document: LyricsDocument? = null,
     val artworkLocator: String? = null,
+    val version: String? = document?.let(::lyricsVersion),
 )
 
 interface SettingsRepository {
@@ -1611,13 +1630,41 @@ class RoomImportSourceRepository(
             assertUniqueImportSourceLabel(updatedSource.label, excludingSourceId = existing.id)
             val report = scanFnMusicDraft(sourceId, preparedDraft, progressSink)
             val credentialKey = existing.credentialKey ?: "credential-$sourceId"
-            persistUpdatedCredential(
-                previousCredentialKey = existing.credentialKey,
-                nextCredentialKey = credentialKey,
-                password = preparedDraft.password,
-            )
-            persistFnMusicAccessCode(sourceId, preparedDraft)
-            persistScanWithProgress(updatedSource.copy(credentialKey = credentialKey), report, progressSink)
+            val previousCredentials = listOf(credentialKey, fnMusicAccessCodeCredentialKey(sourceId))
+                .associateWith { secureCredentialStore.get(it) }
+            val savingContext = currentCoroutineContext()
+            // Once SQLite commits, caller cancellation must not restore credentials for the old source.
+            withContext(NonCancellable) {
+                savingContext.ensureActive()
+                val summary = try {
+                    persistUpdatedCredential(
+                        previousCredentialKey = existing.credentialKey,
+                        nextCredentialKey = credentialKey,
+                        password = preparedDraft.password,
+                    )
+                    persistFnMusicAccessCode(sourceId, preparedDraft)
+                    savingContext.ensureActive()
+                    database.immediateWriteTransaction {
+                        val summary = persistScanWithProgress(
+                            updatedSource.copy(credentialKey = credentialKey), report, progressSink, reconcileLyricsOffsets = false,
+                        )
+                        savingContext.ensureActive()
+                        summary
+                    }
+                } catch (failure: Throwable) {
+                    previousCredentials.forEach { (key, value) ->
+                        try {
+                            if (value == null) secureCredentialStore.remove(key) else secureCredentialStore.put(key, value)
+                        } catch (rollbackFailure: Throwable) {
+                            if (rollbackFailure !== failure) failure.addSuppressed(rollbackFailure)
+                        }
+                    }
+                    throw failure
+                }
+                // Publish lyrics changes only after the source transaction commits; later cleanup cannot undo secrets.
+                database.reconcileSourceLyricsOffsets(trackIdPrefix(sourceId))
+                summary
+            }
         }
     }
 
@@ -1630,7 +1677,7 @@ class RoomImportSourceRepository(
                 wanBaseUrl = preparedDraft.wanBaseUrl,
                 normalizeBaseUrl = ::normalizeFnMusicBaseUrl,
             ) { candidate ->
-                gateway.testFnMusic(preparedDraft.copy(baseUrl = candidate.value, wanBaseUrl = ""), deviceId)
+                gateway.testFnMusic(preparedDraft.atFnMusicAddress(candidate), deviceId)
             }
             FnMusicConnectionMode.FN_CONNECT -> gateway.testFnMusic(preparedDraft, deviceId)
         }
@@ -1661,13 +1708,18 @@ class RoomImportSourceRepository(
                 wanBaseUrl = preparedDraft.wanBaseUrl,
                 normalizeBaseUrl = ::normalizeFnMusicBaseUrl,
             ) { candidate ->
-                block(preparedDraft.copy(baseUrl = candidate.value, wanBaseUrl = ""))
+                block(preparedDraft.atFnMusicAddress(candidate))
             }
             FnMusicConnectionMode.FN_CONNECT -> block(preparedDraft)
         }
     }
 
-    /** Fills a blank password/access code from the stored source; an address-mode source never keeps an access code. */
+    private fun FnMusicSourceDraft.atFnMusicAddress(candidate: RemoteSourceBaseUrl): FnMusicSourceDraft = copy(
+        baseUrl = candidate.value.takeIf { candidate.kind == RemoteSourceAddressKind.LAN }.orEmpty(),
+        wanBaseUrl = candidate.value.takeIf { candidate.kind == RemoteSourceAddressKind.WAN }.orEmpty(),
+    )
+
+    /** Access codes belong to the server and are retained independently of account password reuse. */
     private suspend fun FnMusicSourceDraft.withStoredFnMusicSecrets(
         existing: ImportSource,
         keepExistingCredentialWhenBlankPassword: Boolean,
@@ -1679,17 +1731,16 @@ class RoomImportSourceRepository(
         }
         if (resolvedPassword.isBlank()) throw UiTextException(uiText(Res.string.source_credentials_missing, FN_MUSIC_NAME))
         val resolvedAccessCode = when {
-            connectionMode == FnMusicConnectionMode.ADDRESS -> ""
+            clearAccessCode -> ""
             accessCode.isNotBlank() -> accessCode
-            keepExistingCredentialWhenBlankPassword -> secureCredentialStore.get(fnMusicAccessCodeCredentialKey(existing.id)).orEmpty()
-            else -> ""
+            else -> secureCredentialStore.get(fnMusicAccessCodeCredentialKey(existing.id)).orEmpty()
         }
         return copy(password = resolvedPassword, accessCode = resolvedAccessCode)
     }
 
     private suspend fun persistFnMusicAccessCode(sourceId: String, preparedDraft: FnMusicSourceDraft) {
         val key = fnMusicAccessCodeCredentialKey(sourceId)
-        if (preparedDraft.connectionMode == FnMusicConnectionMode.FN_CONNECT && preparedDraft.accessCode.isNotEmpty()) {
+        if (!preparedDraft.clearAccessCode && preparedDraft.accessCode.isNotBlank()) {
             secureCredentialStore.put(key, preparedDraft.accessCode)
         } else {
             secureCredentialStore.remove(key)
@@ -1891,6 +1942,8 @@ class RoomImportSourceRepository(
             database.trackPlaybackStatsDao().deleteBySourceId(source.id)
             database.trackDao().deleteBySourceId(source.id)
             database.lyricsCacheDao().deleteByTrackIdPrefix(trackIdPrefix(source.id))
+            database.lyricsOffsetDao().deleteByPrefix(trackIdPrefix(source.id))
+            LyricsChanges.publish(null)
             database.importIndexStateDao().deleteBySourceId(source.id)
             database.importSourceDao().deleteById(source.id)
             addressSelector.invalidate(source.id)
@@ -2292,7 +2345,7 @@ class RoomImportSourceRepository(
         }
     }
 
-    private suspend fun persistScan(source: ImportSource, report: ImportScanReport): ImportScanSummary {
+    private suspend fun persistScan(source: ImportSource, report: ImportScanReport, reconcileLyricsOffsets: Boolean = true): ImportScanSummary {
         val scannedAt = now()
         val warningMessage = scanWarningsForStorage(report.warnings)
         val persistedSource = report.refreshedPersistentReference
@@ -2317,6 +2370,8 @@ class RoomImportSourceRepository(
             val keptEmbeddedLyrics = keptTracks.map { it.id }.chunked(SQLITE_IN_CLAUSE_CHUNK_SIZE).flatMap { trackIds ->
                 database.lyricsCacheDao().getByTrackIdsAndSourceId(trackIds, EMBEDDED_LYRICS_SOURCE_ID)
             }
+            val selectedEmbeddedTrackIds = database.lyricsCacheDao()
+                .getSelectedTrackIds(trackIdPrefix(source.id), EMBEDDED_LYRICS_SOURCE_ID).toSet()
             database.trackDao().deleteBySourceId(source.id)
             database.lyricsCacheDao().deleteByTrackIdPrefixAndSourceId(
                 trackIdPrefix(source.id),
@@ -2339,6 +2394,7 @@ class RoomImportSourceRepository(
                                 sourceId = EMBEDDED_LYRICS_SOURCE_ID,
                                 rawPayload = lyrics,
                                 updatedAt = scannedAt,
+                                selectedForPlayback = entity.id in selectedEmbeddedTrackIds,
                             ),
                         )
                     }
@@ -2364,7 +2420,7 @@ class RoomImportSourceRepository(
                 importedTrackCount = scannedTrackEntities.size,
                 failures = report.failures,
             )
-        }
+        }.also { if (reconcileLyricsOffsets) database.reconcileSourceLyricsOffsets(trackIdPrefix(source.id)) }
     }
 
     /**
@@ -2398,6 +2454,7 @@ class RoomImportSourceRepository(
         source: ImportSource,
         report: ImportScanReport,
         progressSink: ImportScanProgressSink,
+        reconcileLyricsOffsets: Boolean = true,
     ): ImportScanSummary {
         progressSink.onProgress(
             ImportScanProgress(
@@ -2407,7 +2464,7 @@ class RoomImportSourceRepository(
                 totalTrackCount = report.totalTrackCount,
             ),
         )
-        return persistScan(source, report)
+        return persistScan(source, report, reconcileLyricsOffsets)
     }
 
     private suspend fun rescanNavidromeSource(
@@ -3037,6 +3094,24 @@ class DefaultLyricsRepository(
     private val logger: DiagnosticLogger = NoopDiagnosticLogger,
     private val addressSelector: RemoteSourceAddressSelector = RemoteSourceAddressSelector(),
 ) : LyricsRepository {
+    override val changes: Flow<LyricsChange> = LyricsChanges.changes
+    override suspend fun readOffset(track: Track, version: String): Long? = database.readLyricsOffset(track, version)
+    override suspend fun saveOffset(track: Track, version: String, offsetMs: Long): Boolean =
+        database.saveLyricsOffset(track, version, offsetMs)
+
+    override suspend fun loadPlaybackLyrics(track: Track): LyricsLoadResult = try {
+        val previousVersion = database.currentCachedLyricsVersion(track)
+        val result = getLyrics(track)
+        when {
+            result != null -> LyricsLoadResult.Found(result)
+            previousVersion != null && database.currentCachedLyricsVersion(track) == null -> LyricsLoadResult.Removed
+            else -> LyricsLoadResult.Unavailable()
+        }
+    } catch (error: Throwable) {
+        if (error is CancellationException) throw error
+        LyricsLoadResult.Unavailable(error)
+    }
+
     override suspend fun getLyrics(track: Track): ResolvedLyricsResult? {
         val trackLabel = track.logIdentity()
         val cachedRows = database.lyricsCacheDao().getByTrack(track.id)
@@ -3053,6 +3128,18 @@ class DefaultLyricsRepository(
                 logCacheHit(trackLabel, resolved.document)
                 return resolved.withArtworkOverride(manualArtworkOverride)
             }
+        val selectedRow = cachedRows.firstOrNull { it.selectedForPlayback }
+        val selectedLyrics = selectedRow?.let { row ->
+            if (row.sourceId == SAME_NAME_LRC_SOURCE_ID) {
+                resolveSameNameLyricsForPlayback(track, cachedRows)
+            } else {
+                resolveCachedLyricsForTrack(track, row, suppressArtwork = hasRealLocalAlbumArtworkCache)
+            }
+        }
+        if (selectedLyrics != null) {
+            logCacheHit(trackLabel, selectedLyrics.document)
+            return selectedLyrics.withArtworkOverride(manualArtworkOverride)
+        }
         val embyLocator = parseEmbySongLocator(track.mediaLocator)
         val serverLyricsSourceId = when {
             embyLocator != null -> EMBY_LYRICS_SOURCE_ID
@@ -3141,8 +3228,10 @@ class DefaultLyricsRepository(
                     .withArtworkOverride(manualArtworkOverride)
             }
         } else {
-            resolveSameNameLyricsForPlayback(track, cachedRows)?.let { resolved ->
-                return resolved.withArtworkOverride(manualArtworkOverride)
+            if (selectedRow?.sourceId != SAME_NAME_LRC_SOURCE_ID) {
+                resolveSameNameLyricsForPlayback(track, cachedRows)?.let { resolved ->
+                    return resolved.withArtworkOverride(manualArtworkOverride)
+                }
             }
             cachedRows
                 .firstNotNullOfOrNull { cache ->
@@ -3460,8 +3549,7 @@ class DefaultLyricsRepository(
         val result = when (mode) {
             LyricsSearchApplyMode.FULL -> {
                 val artworkLocator = if (candidate.isTrackProvided) {
-                    persistManualOverride(trackId = trackId, rawPayload = null, artworkLocator = null)
-                    storeLyricsDocument(trackId, appliedDocument)
+                    storeLyricsDocument(trackId, appliedDocument, selectForPlayback = true)
                     sourceArtwork?.let {
                         cacheArtworkLocator(
                             trackId = trackId,
@@ -3483,6 +3571,7 @@ class DefaultLyricsRepository(
                     persistManualOverride(
                         trackId = trackId,
                         rawPayload = appliedDocument.rawPayload,
+                        originalSourceId = appliedDocument.sourceId,
                         artworkLocator = normalizedArtworkLocator,
                     )
                     normalizedArtworkLocator
@@ -3495,16 +3584,16 @@ class DefaultLyricsRepository(
 
             LyricsSearchApplyMode.LYRICS_ONLY -> {
                 if (candidate.isTrackProvided) {
-                    persistManualOverride(
-                        trackId = trackId,
-                        rawPayload = null,
-                        artworkLocator = existingManualArtwork,
+                    storeLyricsDocument(
+                        trackId, appliedDocument,
+                        selectForPlayback = true,
+                        manualArtworkOverride = existingManualArtwork,
                     )
-                    storeLyricsDocument(trackId, appliedDocument)
                 } else {
                     persistManualOverride(
                         trackId = trackId,
                         rawPayload = appliedDocument.rawPayload,
+                        originalSourceId = appliedDocument.sourceId,
                         artworkLocator = existingManualArtwork,
                     )
                 }
@@ -3661,7 +3750,7 @@ class DefaultLyricsRepository(
             }
 
             SameNameLyricsLookup.Missing -> {
-                database.lyricsCacheDao().deleteByTrackIdAndSourceId(track.id, SAME_NAME_LRC_SOURCE_ID)
+                database.removeLyricsCache(track.id, SAME_NAME_LRC_SOURCE_ID)
                 null
             }
 
@@ -3689,7 +3778,7 @@ class DefaultLyricsRepository(
             }
 
             SameNameLyricsLookup.Missing -> {
-                database.lyricsCacheDao().deleteByTrackIdAndSourceId(track.id, SAME_NAME_LRC_SOURCE_ID)
+                database.removeLyricsCache(track.id, SAME_NAME_LRC_SOURCE_ID)
                 null
             }
 
@@ -3844,20 +3933,23 @@ class DefaultLyricsRepository(
         trackId: String,
         rawPayload: String?,
         artworkLocator: String?,
+        originalSourceId: String? = null,
     ) {
+        val previous = manualOverrideRow(trackId)
         val normalizedPayload = rawPayload?.trim().orEmpty()
         val normalizedArtwork = normalizeArtworkLocator(artworkLocator)?.trim().orEmpty()
         if (normalizedPayload.isBlank() && normalizedArtwork.isBlank()) {
-            database.lyricsCacheDao().deleteByTrackIdAndSourceId(trackId, MANUAL_LYRICS_OVERRIDE_SOURCE_ID)
+            database.removeLyricsCache(trackId, MANUAL_LYRICS_OVERRIDE_SOURCE_ID)
             return
         }
-        database.lyricsCacheDao().upsert(
+        database.writeLyricsCache(
             LyricsCacheEntity(
                 trackId = trackId,
                 sourceId = MANUAL_LYRICS_OVERRIDE_SOURCE_ID,
                 rawPayload = normalizedPayload,
                 updatedAt = now(),
                 artworkLocator = normalizedArtwork.ifBlank { null },
+                originalSourceId = originalSourceId ?: previous?.originalSourceId.takeIf { previous?.rawPayload == normalizedPayload },
             ),
         )
     }
@@ -3897,6 +3989,7 @@ class DefaultLyricsRepository(
                 persistManualOverride(
                     trackId = trackId,
                     rawPayload = appliedDocument.rawPayload,
+                    originalSourceId = appliedDocument.sourceId,
                     artworkLocator = normalizedArtworkLocator,
                 )
                 AppliedLyricsResult(
@@ -3910,6 +4003,7 @@ class DefaultLyricsRepository(
                 persistManualOverride(
                     trackId = trackId,
                     rawPayload = appliedDocument.rawPayload,
+                    originalSourceId = appliedDocument.sourceId,
                     artworkLocator = existingManualArtwork,
                 )
                 AppliedLyricsResult(
@@ -4017,6 +4111,7 @@ class DefaultLyricsRepository(
         return parseCachedLyrics(row.sourceId, row.rawPayload)?.let { cached ->
             ResolvedLyricsResult(
                 document = cached,
+                version = row.versionOrNull() ?: lyricsVersion(cached),
                 artworkLocator = normalizeArtworkLocator(row.artworkLocator).takeUnless { suppressArtwork },
             )
         }
@@ -4358,16 +4453,19 @@ class DefaultLyricsRepository(
         document: LyricsDocument,
         cacheSourceId: String = document.sourceId,
         artworkLocator: String? = null,
+        selectForPlayback: Boolean = false,
+        manualArtworkOverride: String? = null,
     ) {
-        database.lyricsCacheDao().upsert(
-            LyricsCacheEntity(
-                trackId = trackId,
-                sourceId = cacheSourceId,
-                rawPayload = preferredStoredLyricsPayload(document),
-                updatedAt = now(),
-                artworkLocator = normalizeArtworkLocator(artworkLocator),
-            ),
+        val row = LyricsCacheEntity(
+            trackId = trackId,
+            sourceId = cacheSourceId,
+            originalSourceId = document.sourceId,
+            rawPayload = preferredStoredLyricsPayload(document),
+            updatedAt = now(),
+            artworkLocator = normalizeArtworkLocator(artworkLocator),
         )
+        if (selectForPlayback) database.selectTrackProvidedLyrics(row, manualArtworkOverride)
+        else database.writeLyricsCache(row)
     }
 }
 

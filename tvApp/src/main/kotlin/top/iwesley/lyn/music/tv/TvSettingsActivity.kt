@@ -18,9 +18,7 @@ import top.iwesley.lyn.music.uiString
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.os.Build
 import android.os.Bundle
-import android.util.DisplayMetrics
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -132,7 +130,6 @@ import androidx.tv.material3.OutlinedButton as TvOutlinedButton
 import androidx.tv.material3.OutlinedButtonDefaults as TvOutlinedButtonDefaults
 import java.text.SimpleDateFormat
 import java.util.Date
-import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import top.iwesley.lyn.music.BadgedIcon
@@ -152,8 +149,8 @@ import top.iwesley.lyn.music.core.model.PlatformCapabilities
 import top.iwesley.lyn.music.core.model.SourceWithStatus
 import top.iwesley.lyn.music.core.model.SubsonicAuthMode
 import top.iwesley.lyn.music.core.model.displayWebDavRootUrl
-import top.iwesley.lyn.music.core.model.effectiveAppDisplayDensity
 import top.iwesley.lyn.music.core.model.formatSambaEndpoint
+import top.iwesley.lyn.music.platform.androidAppDisplayDensity
 import top.iwesley.lyn.music.feature.importing.ImportIntent
 import top.iwesley.lyn.music.feature.importing.ImportScanOperation
 import top.iwesley.lyn.music.feature.importing.ImportState
@@ -1097,11 +1094,13 @@ private fun TvRemoteSourceCreatorDialog(
     }
 }
 
-private fun remoteSourceDialogFocusRows(
+internal fun remoteSourceDialogFocusRows(
     prefix: String,
     type: ImportSourceType,
     folderTreeRows: List<List<String>> = emptyList(),
     fnConnect: Boolean = false,
+    isEditing: Boolean = false,
+    clearAccessCode: Boolean = false,
 ): List<List<String>> {
     val buttons = listOf("$prefix:test", "$prefix:cancel", "$prefix:submit")
     return when (type) {
@@ -1144,7 +1143,8 @@ private fun remoteSourceDialogFocusRows(
             listOf("$prefix:label"),
             listOf("$prefix:fnconnect"),
             if (fnConnect) listOf("$prefix:fnid") else listOf("$prefix:root"),
-            if (fnConnect) listOf("$prefix:access") else null,
+            if (!clearAccessCode) listOf("$prefix:access") else null,
+            if (isEditing) listOf("$prefix:clear-access") else null,
             listOf("$prefix:username", "$prefix:password"),
             buttons,
         )
@@ -1646,7 +1646,7 @@ private fun TvFnMusicSourceForm(
     }
 }
 
-/** FN Connect switch plus either the server address or the FN ID and access code. */
+/** Both connection modes share the server access code and its explicit clear action. */
 @Composable
 private fun TvFnMusicConnectionFields(
     connectionMode: FnMusicConnectionMode,
@@ -1660,6 +1660,8 @@ private fun TvFnMusicConnectionFields(
     onAccessCodeChange: (String) -> Unit,
     focusPrefix: String,
     focusChain: TvSettingsFocusChain,
+    clearAccessCode: Boolean = false,
+    onClearAccessCodeChange: (Boolean) -> Unit = {},
 ) {
     val fnConnect = connectionMode == FnMusicConnectionMode.FN_CONNECT
     TvSettingsSwitchRow(
@@ -1680,15 +1682,6 @@ private fun TvFnMusicConnectionFields(
             focusKey = "$focusPrefix:fnid",
             focusChain = focusChain,
         )
-        TvSettingsTextField(
-            label = uiString(Res.string.fn_music_access_code_label),
-            value = accessCode,
-            onValueChange = onAccessCodeChange,
-            placeholder = if (isEditing) uiString(Res.string.fn_music_access_code_keep_hint) else "",
-            password = true,
-            focusKey = "$focusPrefix:access",
-            focusChain = focusChain,
-        )
     } else {
         TvSettingsTextField(
             label = uiString(Res.string.common_server_address),
@@ -1696,6 +1689,25 @@ private fun TvFnMusicConnectionFields(
             onValueChange = onBaseUrlChange,
             placeholder = "http://192.168.1.2:5666",
             focusKey = "$focusPrefix:root",
+            focusChain = focusChain,
+        )
+    }
+    TvSettingsTextField(
+        label = uiString(Res.string.fn_music_access_code_label),
+        value = accessCode,
+        onValueChange = onAccessCodeChange,
+        placeholder = if (isEditing) uiString(Res.string.fn_music_access_code_keep_hint) else "",
+        password = true,
+        enabled = !clearAccessCode,
+        focusKey = "$focusPrefix:access",
+        focusChain = focusChain,
+    )
+    if (isEditing) {
+        TvSettingsSwitchRow(
+            title = uiString(Res.string.fn_music_clear_access_code_label),
+            checked = clearAccessCode,
+            onCheckedChange = onClearAccessCodeChange,
+            focusKey = "$focusPrefix:clear-access",
             focusChain = focusChain,
         )
     }
@@ -1825,12 +1837,14 @@ private fun TvRemoteSourceEditorDialog(
     val folderRows = state.remoteFolderTree?.visibleRows(folderRootName).orEmpty()
     val treeFocusRows = tvFolderTreeFocusRows(focusPrefix, state.remoteFolderTree, folderRows, state.capabilities.supportsSambaImport)
     val focusChain = rememberTvDialogFocusChain(
-        focusRows = remember(focusPrefix, editor.type, treeFocusRows, editor.fnMusicConnectionMode) {
+        focusRows = remember(focusPrefix, editor.type, treeFocusRows, editor.fnMusicConnectionMode, editor.clearFnMusicAccessCode) {
             remoteSourceDialogFocusRows(
                 prefix = focusPrefix,
                 type = editor.type,
                 folderTreeRows = treeFocusRows,
                 fnConnect = editor.fnMusicConnectionMode == FnMusicConnectionMode.FN_CONNECT,
+                isEditing = true,
+                clearAccessCode = editor.clearFnMusicAccessCode,
             )
         },
     )
@@ -1946,6 +1960,8 @@ private fun TvRemoteSourceEditorDialog(
                             onBaseUrlChange = { onIntent(ImportIntent.RemoteSourceRootUrlChanged(it)) },
                             onFnIdChange = { onIntent(ImportIntent.RemoteSourceFnMusicIdChanged(it)) },
                             onAccessCodeChange = { onIntent(ImportIntent.RemoteSourceFnMusicAccessCodeChanged(it)) },
+                            clearAccessCode = editor.clearFnMusicAccessCode,
+                            onClearAccessCodeChange = { onIntent(ImportIntent.RemoteSourceFnMusicClearAccessCodeChanged(it)) },
                             focusPrefix = focusPrefix,
                             focusChain = focusChain,
                         )
@@ -2895,6 +2911,7 @@ private fun TvSettingsTextField(
     password: Boolean = false,
     focusKey: String? = null,
     focusChain: TvSettingsFocusChain? = null,
+    enabled: Boolean = true,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val imeVisible = WindowInsets.isImeVisible
@@ -2910,6 +2927,7 @@ private fun TvSettingsTextField(
     }
 
     fun enterEditing() {
+        if (!enabled) return
         imeWasVisibleDuringEditing = false
         fieldValue = fieldValue.copy(selection = TextRange(fieldValue.text.length))
         editing = true
@@ -2923,6 +2941,10 @@ private fun TvSettingsTextField(
 
     BackHandler(enabled = editing) {
         exitEditing()
+    }
+
+    LaunchedEffect(enabled) {
+        if (!enabled && editing) exitEditing()
     }
 
     LaunchedEffect(editing) {
@@ -2955,7 +2977,7 @@ private fun TvSettingsTextField(
 
     val targetKey = focusKey
     val targetChain = focusChain
-    val fieldModifier = if (targetKey != null && targetChain?.contains(targetKey) == true) {
+    val fieldModifier = if (enabled && targetKey != null && targetChain?.contains(targetKey) == true) {
         modifier.tvSettingsTextFieldFocusTarget(
             key = targetKey,
             focusChain = targetChain,
@@ -2981,6 +3003,7 @@ private fun TvSettingsTextField(
             null
         },
         singleLine = true,
+        enabled = enabled,
         readOnly = !editing,
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(
@@ -3144,23 +3167,13 @@ private fun ProvideTvSettingsDensity(
     val currentDensity = LocalDensity.current
     val fixedDensity = remember(currentDensity.density, currentDensity.fontScale, appDisplayScalePreset) {
         Density(
-            density = effectiveAppDisplayDensity(tvSettingsStableDensityScale(currentDensity.density), appDisplayScalePreset),
+            density = androidAppDisplayDensity(currentDensity.density, appDisplayScalePreset),
             fontScale = currentDensity.fontScale,
         )
     }
     CompositionLocalProvider(LocalDensity provides fixedDensity) {
         content()
     }
-}
-
-private fun tvSettingsStableDensityScale(fallbackDensity: Float): Float {
-    val fallbackDpi = (fallbackDensity.takeIf { it > 0f } ?: 1f) * DisplayMetrics.DENSITY_DEFAULT
-    val stableDpi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-        DisplayMetrics.DENSITY_DEVICE_STABLE
-    } else {
-        fallbackDpi.roundToInt()
-    }.takeIf { it > 0 } ?: fallbackDpi.roundToInt()
-    return stableDpi / DisplayMetrics.DENSITY_DEFAULT.toFloat()
 }
 
 private enum class TvSettingsSection(
